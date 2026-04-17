@@ -1,7 +1,6 @@
 # QnA Generation Agent
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A production-grade microservice for generating grounded questions and model answers as part of the AssessorFlow platform. This service integrates with Google Cloud Pub/Sub for event-driven workflows, gRPC for inter-service communication, and Langfuse for prompt management and telemetry. Persistence is handled via in-memory repositories (extensible to external stores).
 
@@ -19,7 +18,7 @@ flowchart TB
     end
 
     subgraph "QnA Generation Agent"
-        HTTP[HTTP Interface<br/>Granian + BlackSheep]
+        HTTP[HTTP Interface Granian + BlackSheep]
         PubSub[Pub/Sub Subscriber]
         Core[Core Domain]
 
@@ -30,8 +29,8 @@ flowchart TB
         end
 
         subgraph "Infrastructure Layer"
-            LLM[LLM Provider<br/>Strands/OpenAI]
-            PromptProvider[Prompt Provider<br/>Langfuse]
+            LLM[LLM Provider Strands/OpenAI]
+            PromptProvider[Prompt Provider Langfuse]
             Telemetry[Langfuse Telemetry]
         end
     end
@@ -304,33 +303,33 @@ A **three-level parallel workflow** using [Strands Agents](https://strandsagents
 ```mermaid
 flowchart TB
     subgraph "Workflow Architecture"
-        O[Orchestrator Agent<br/>tools=[workflow]]
+        O[Orchestrator Agent - tools: workflow]
 
-        subgraph "Level 1: Assessment Generation<br/>(Parallel by Subtopic)"
-            L1A[Task: Subtopic A<br/>Prompt: Assessment Generator]
-            L1B[Task: Subtopic B<br/>Prompt: Assessment Generator]
-            L1N[Task: Subtopic N<br/>Prompt: Assessment Generator]
+        subgraph "Level 1: Assessment Generation (Parallel by Subtopic)"
+            L1A[Task: Subtopic A Prompt: Assessment Generator]
+            L1B[Task: Subtopic B Prompt: Assessment Generator]
+            L1N[Task: Subtopic N Prompt: Assessment Generator]
         end
 
-        subgraph "Level 2: MCQ Answer Generation<br/>(Parallel by Question)"
-            L2A[Task: Question 1<br/>Prompt: MCQ Answer Generator]
-            L2B[Task: Question 2<br/>Prompt: MCQ Answer Generator]
-            L2N[Task: Question N<br/>Prompt: MCQ Answer Generator]
+        subgraph "Level 2: MCQ Answer Generation (Parallel by Question)"
+            L2A[Task: Question 1 Prompt: MCQ Answer Generator]
+            L2B[Task: Question 2 Prompt: MCQ Answer Generator]
+            L2N[Task: Question N Prompt: MCQ Answer Generator]
         end
 
-        subgraph "Level 3: MCQ Explanation Generation<br/>(Parallel by Question)"
-            L3A[Task: Question 1<br/>Prompt: MCQ Explanation Generator]
-            L3B[Task: Question 2<br/>Prompt: MCQ Explanation Generator]
-            L3N[Task: Question N<br/>Prompt: MCQ Explanation Generator]
+        subgraph "Level 3: MCQ Explanation Generation (Parallel by Question)"
+            L3A[Task: Question 1 Prompt: MCQ Explanation Generator]
+            L3B[Task: Question 2 Prompt: MCQ Explanation Generator]
+            L3N[Task: Question N Prompt: MCQ Explanation Generator]
         end
 
-        subgraph "Parallel Track: Non-Structured<br/>(Parallel by Subtopic)"
-            NSA[Task: Subtopic A<br/>Prompt: Assessment Generator]
-            NSB[Task: Subtopic B<br/>Prompt: Assessment Generator]
+        subgraph "Parallel Track: Non-Structured (Parallel by Subtopic)"
+            NSA[Task: Subtopic A Prompt: Assessment Generator]
+            NSB[Task: Subtopic B Prompt: Assessment Generator]
         end
     end
 
-    O -->|workflow.create()<br/>workflow.start()| L1A
+    O -->|workflow.create() workflow.start()| L1A
     O --> L1B
     O --> L1N
 
@@ -652,13 +651,8 @@ uv run pre-commit install
 uv run ruff check . && uv run mypy . && uv run pytest
 ```
 
-## License
-
-MIT License - see LICENSE file for details.
-
 ## Related Documentation
 
 - [CLAUDE.md](CLAUDE.md) - Architecture and development guide
 - [API Documentation](http://localhost:8000/docs) - Swagger UI (when running)
-- [AssessorFlow Platform](https://docs.assessorflow.io) - Platform-wide documentation
 - [Langfuse Documentation](https://langfuse.com/docs) - Prompt management and telemetry
