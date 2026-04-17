@@ -1,0 +1,151 @@
+"""Domain entities."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+from qna_generation_agent.domain.enums import (
+    GenerationStatus,
+    QuestionType,
+)
+from qna_generation_agent.domain.errors import (
+    InvalidStateTransitionError,
+    ValidationError,
+)
+from qna_generation_agent.domain.value_objects import AnswerId, QuestionId
+
+__all__ = [
+    "Answer",
+    "GenerationRequest",
+    "Question",
+    "QuestionSet",
+]
+
+
+@dataclass(slots=True)
+class Answer:
+    """Represents a model answer."""
+
+    id: AnswerId
+    text: str
+    explanation: str | None = None
+    references: list[str] = field(default_factory=list)
+    confidence_score: float | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValidationError("Answer text cannot be empty")
+        if (
+            self.confidence_score is not None
+            and not 0.0 <= self.confidence_score <= 1.0
+        ):
+            raise ValidationError("Confidence score must be between 0.0 and 1.0")
+
+
+@dataclass(slots=True)
+class Question:
+    """Represents a generated question."""
+
+    id: QuestionId
+    text: str
+    question_type: QuestionType
+    difficulty_level: str | None
+    answer: Answer
+    topic_id: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValidationError("Question text cannot be empty")
+
+
+@dataclass(slots=True)
+class QuestionSet:
+    """Represents one persisted generation output."""
+
+    id: str
+    assessment_id: str
+    iteration: int
+    purpose: str | None
+    questions: list[Question] = field(default_factory=list)
+    status: GenerationStatus = GenerationStatus.PENDING
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValidationError("QuestionSet id cannot be empty")
+        if not self.assessment_id.strip():
+            raise ValidationError("QuestionSet assessment_id cannot be empty")
+        if self.iteration < 0:
+            raise ValidationError("QuestionSet iteration must be non-negative")
+
+    def _transition_to(
+        self,
+        target: GenerationStatus,
+        valid_from: set[GenerationStatus],
+        message: str,
+    ) -> None:
+        """Transition to target state if current state is valid."""
+        if self.status not in valid_from:
+            raise InvalidStateTransitionError(
+                message,
+                from_state=self.status.value,
+                to_state=target.value,
+                entity_id=self.id,
+            )
+        self.status = target
+
+    def mark_in_progress(self) -> None:
+        self._transition_to(
+            GenerationStatus.IN_PROGRESS,
+            {GenerationStatus.PENDING},
+            "QuestionSet can only start from pending",
+        )
+
+    def mark_completed(self) -> None:
+        self._transition_to(
+            GenerationStatus.COMPLETED,
+            {GenerationStatus.IN_PROGRESS},
+            "QuestionSet can only complete from in_progress",
+        )
+
+    def mark_failed(self) -> None:
+        self._transition_to(
+            GenerationStatus.FAILED,
+            {GenerationStatus.PENDING, GenerationStatus.IN_PROGRESS},
+            "QuestionSet can only fail from pending or in_progress",
+        )
+
+    def add_question(self, question: Question) -> None:
+        self.questions.append(question)
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationRequest:
+    """Represents a normalized generation request per spec.
+
+    Supports two flows:
+    1. Initial generation: structured_count, non_structured_count, difficulty_level, purpose required
+    2. Regeneration: validation_result, iteration, feedback_issues present; generation params nullable
+    """
+
+    id: str
+    assessment_id: str
+    validation_result: str | None
+    iteration: int | None  # Nullable for initial generation
+    structured_count: int | None  # Nullable for regeneration
+    non_structured_count: int | None  # Nullable for regeneration
+    difficulty_level: str | None  # Nullable for regeneration
+    purpose: str | None  # Nullable for regeneration
+    correlation_id: str
+    workflow_id: str
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValidationError("GenerationRequest id cannot be empty")
+        if not self.assessment_id.strip():
+            raise ValidationError("GenerationRequest assessment_id cannot be empty")

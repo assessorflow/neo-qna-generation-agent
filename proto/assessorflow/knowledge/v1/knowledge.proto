@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package assessorflow.knowledge.v1;
+
+option java_multiple_files = true;
+
+// Knowledge Service — internal gRPC API (api_contract.md Section 3)
+// RAG pipeline: chunking, embedding, similarity search across 3 Knowledge Bases.
+service KnowledgeService {
+  rpc GetTopics (GetTopicsRequest) returns (GetTopicsResponse);
+  rpc SimilaritySearch (SimilaritySearchRequest) returns (SimilaritySearchResponse);
+  rpc GetChunksByIds (GetChunksByIdsRequest) returns (GetChunksByIdsResponse);
+}
+
+// --- Shared messages ---
+
+message Chunk {
+  string chunk_id = 1;
+  string workflow_id = 2;
+  string content = 3;
+  string source_type = 4;
+  map<string, string> metadata = 5;
+  double score = 6;
+}
+
+message Topic {
+  string topic_id = 1;
+  string name = 2;
+  repeated Topic subtopics = 3;
+}
+
+// --- Request/Response messages ---
+
+message GetTopicsRequest {
+  string workflow_id = 1;
+}
+message GetTopicsResponse {
+  string workflow_id = 1;
+  repeated Topic topics = 2;
+}
+
+message SimilaritySearchRequest {
+  string query = 1;
+  string workflow_id = 2;
+  string kb_type = 3;
+  int32 top_k = 4;
+  string assessment_id = 5;
+}
+message SimilaritySearchResponse {
+  string workflow_id = 1;
+  repeated Chunk chunks = 2;
+}
+
+message GetChunksByIdsRequest {
+  repeated string chunk_ids = 1;
+}
+message GetChunksByIdsResponse {
+  repeated Chunk chunks = 1;
+}

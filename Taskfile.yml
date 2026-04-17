@@ -1,0 +1,75 @@
+version: '3'
+
+env:
+  UV_CACHE_DIR: /tmp/uv-cache
+
+vars:
+  IMAGE_NAME: qna-generation-agent
+  HTTP_PORT: 8000
+  CONTAINER_FILE: deployments/container/Containerfile
+  APP: qna_generation_agent.interfaces.serve.app:app
+
+tasks:
+  default:
+    desc: Run the development server with HTTP + Pub/Sub
+    cmds:
+      - uv run qna-serve
+
+  run:
+    desc: Alias for default - Run the development server
+    cmds:
+      - task: default
+
+  dev:
+    desc: Run the development server with reload enabled
+    cmds:
+      - uv run granian --interface asgi --host 0.0.0.0 --port {{.HTTP_PORT}} --reload --reload-paths src {{.APP}}
+
+  proto:
+    desc: Compile protobuf files
+    cmds:
+      - uv run scripts/compile_protos.py
+
+  deps:
+    desc: Sync dev dependencies with uv
+    cmds:
+      - uv sync --extra dev --extra test --extra lint
+
+  lint:
+    desc: Run Ruff
+    cmds:
+      - uv run ruff check .
+
+  typecheck:
+    desc: Run mypy
+    cmds:
+      - uv run mypy .
+
+  test:
+    desc: Run pytest
+    cmds:
+      - uv run pytest
+
+  coverage:
+    desc: Run pytest with coverage report (fails if under 80%)
+    cmds:
+      - uv run pytest --cov=qna_generation_agent --cov-report=term-missing --cov-report=html --cov-fail-under=80
+
+  audit:
+    desc: Run security audit on dependencies
+    cmds:
+      - uv run pip-audit --desc --format=json 2>/dev/null || uv run pip-audit --desc
+
+  check:
+    desc: Run the full local quality gate
+    deps: [lint, typecheck, test, audit]
+
+  build:
+    desc: Build container image
+    cmds:
+      - podman build -t {{.IMAGE_NAME}}:latest -f {{.CONTAINER_FILE}} .
+
+  run-container:
+    desc: Run the container locally (requires local ADC credentials)
+    cmds:
+      - podman run --rm --userns=keep-id -p {{.HTTP_PORT}}:8080 --env-file .env -v ${HOME}/.config/gcloud/application_default_credentials.json:/secrets/adc.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/adc.json {{.IMAGE_NAME}}:latest

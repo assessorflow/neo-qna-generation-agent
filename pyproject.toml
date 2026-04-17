@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qna-generation-agent"
+version = "0.1.0"
+description = "QnA Generation Agent control plane and Pub/Sub worker"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+dependencies = [
+    "blacksheep>=2.6",
+    "granian[reload]>=2.7",
+    "google-cloud-pubsub>=2.37",
+    "grpcio>=1.80",
+    "langfuse>=4.2",
+    "orjson>=3.11",
+    "strands-agents[openai]>=1.35",
+    "strands-agents-tools>=0.4",
+    "structlog>=25.5",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.13",
+    "openai>=2.31",
+    "grpcio-tools>=1.80.0",
+]
+
+[project.scripts]
+qna-serve = "qna_generation_agent.interfaces.serve.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.5",
+]
+test = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.3",
+    "pytest-cov>=7.1",
+]
+lint = [
+    "mypy>=1.20",
+    "ruff>=0.15",
+]
+audit = [
+    "pip-audit>=2.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qna_generation_agent"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = [".claude", ".codex", "docs", "src/qna_generation_agent/infrastructure/grpc/stubs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+packages = ["qna_generation_agent"]
+mypy_path = ["src"]
+strict = true
+warn_unused_configs = true
+exclude = ["src/qna_generation_agent/infrastructure/grpc/stubs"]
+
+[[tool.mypy.overrides]]
+module = [
+    "blacksheep.*",
+    "google.*",
+    "grpc.*",
+    "langfuse.*",
+    "openapidocs.*",
+    "strands.*",
+    "strands_tools.*",
+    "qna_generation_agent.infrastructure.grpc.stubs.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --cov=qna_generation_agent --cov-report=term-missing"
+asyncio_mode = "auto"
+markers = [
+    "unit: fast tests with no external services",
+    "integration: tests that exercise adapters and application wiring",
+    "contract: tests for event schemas and serialization",
+]
+
+[tool.coverage.run]
+source = ["src/qna_generation_agent"]
+branch = true
+omit = [
+    "*/__init__.py",
+    "src/qna_generation_agent/infrastructure/grpc/stubs/**/*",
+    "src/qna_generation_agent/interfaces/serve/__main__.py",
+    "src/qna_generation_agent/interfaces/serve/app.py",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
