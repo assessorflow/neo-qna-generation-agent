@@ -35,6 +35,11 @@ tasks:
     cmds:
       - uv sync --extra dev --extra test --extra lint
 
+  format:
+    desc: Run Ruff formatter
+    cmds:
+      - uv run ruff format .
+
   lint:
     desc: Run Ruff
     cmds:
@@ -61,8 +66,8 @@ tasks:
       - uv run pip-audit --desc --format=json 2>/dev/null || uv run pip-audit --desc
 
   check:
-    desc: Run the full local quality gate
-    deps: [lint, typecheck, test, audit]
+    desc: Run the full local quality gate (lint, typecheck, test, coverage, audit)
+    deps: [lint, typecheck, test, coverage, audit]
 
   build:
     desc: Build container image

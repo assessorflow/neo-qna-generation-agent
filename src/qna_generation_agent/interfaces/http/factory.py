@@ -105,13 +105,17 @@ def create_blacksheep_app(
     cast(Any, application.services).add_instance(app_container, ApplicationContainer)
 
     # Middlewares are applied in order: first appended = outermost
-    # Order: correlation (set context) → logging (log with context) → errors (catch with context) → CORS (outer layer)
+    # Order: CORS (outer layer) → correlation (set context) → logging (log with context) → errors (catch with context)
+    # CORS must be outermost to ensure error responses include CORS headers for browser clients
+    cors_middleware = _make_cors_middleware(app_container.settings)
+    application.middlewares.append(cors_middleware)
     application.middlewares.append(correlation_middleware)
     application.middlewares.append(request_logging_middleware)
     application.middlewares.append(error_middleware)
-    cors_middleware = _make_cors_middleware(app_container.settings)
-    application.middlewares.append(cors_middleware)
 
+    # Startup/shutdown handlers - used by both TestClient (app.start/stop) and ASGI lifespan
+    # ASGI lifespan (in serve/app.py) provides graceful shutdown; these handlers ensure
+    # TestClient mode also works correctly.
     @application.on_start
     async def on_start() -> None:
         await app_container.startup()

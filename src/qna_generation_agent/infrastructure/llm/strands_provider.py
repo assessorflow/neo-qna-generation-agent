@@ -11,7 +11,7 @@ import asyncio
 from typing import cast
 
 from openai import AsyncOpenAI, AuthenticationError, NotFoundError, OpenAIError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from strands import Agent
 from strands.models.openai import OpenAIModel
 
@@ -23,7 +23,7 @@ from qna_generation_agent.application.dto import (
 )
 from qna_generation_agent.application.errors import LLMPermanentError, LLMTransientError
 from qna_generation_agent.application.ports.llm import LLMProvider
-from qna_generation_agent.domain.enums import QuestionType
+from qna_generation_agent.domain.enums import DifficultyLevel, QuestionType
 from qna_generation_agent.infrastructure.llm.prompt_builder import (
     GeneratedQuestionBatchSchema,
     build_system_prompt,
@@ -31,6 +31,16 @@ from qna_generation_agent.infrastructure.llm.prompt_builder import (
 )
 
 logger = get_logger(__name__)
+
+
+def _parse_difficulty(value: str | None) -> DifficultyLevel | None:
+    """Parse difficulty string to enum."""
+    if value is None:
+        return None
+    try:
+        return DifficultyLevel(value.lower())
+    except ValueError:
+        return None
 
 
 class StrandsLLMProvider(LLMProvider):
@@ -122,9 +132,29 @@ class StrandsLLMProvider(LLMProvider):
                     prompt,
                     structured_output_model=structured_output_model,
                 )
-            return cast(T | None, result.structured_output)
+            structured_output = result.structured_output
+            if structured_output is None:
+                logger.warning(
+                    "invoke_with_schema_no_output",
+                    model=self._model_id,
+                    stop_reason=result.stop_reason
+                    if hasattr(result, "stop_reason")
+                    else None,
+                )
+                return None
+            return cast(T, structured_output)
         except TimeoutError:
             logger.warning("invoke_with_schema_timeout")
+            return None
+        except ValidationError as error:
+            # Schema validation failed - LLM returned malformed output
+            logger.error(
+                "invoke_with_schema_validation_error",
+                error_type=type(error).__name__,
+                error=str(error),
+                model=self._model_id,
+                schema_name=structured_output_model.__name__,
+            )
             return None
         except (AuthenticationError, NotFoundError) as error:
             # Permanent errors - don't retry
@@ -211,19 +241,7 @@ class StrandsLLMProvider(LLMProvider):
                 model=self._model_id,
             ) from error
         except Exception as error:
-            # Log full error details for debugging
-            import traceback
-
-            logger.error(
-                "strands_generation_exception",
-                error=str(error),
-                error_type=type(error).__name__,
-                traceback=traceback.format_exc()[-2000:],  # Last 2000 chars
-                model=self._model_id,
-                prompt_preview=prompt[:500]
-                if isinstance(prompt, str)
-                else str(prompt)[:500],
-            )
+            # Map exceptions consistently without logging prompt content
             message = str(error).lower()
             if (
                 "rate limit" in message
@@ -270,24 +288,53 @@ class StrandsLLMProvider(LLMProvider):
                 else None,
             )
 
-        questions = [
-            QuestionDraft(
-                question_text=item.question_text,
-                answer_text=item.answer_text,
-                question_type=question_type,
-                difficulty_level=difficulty_level,
-                explanation=item.explanation,
-                references=item.references,
-                topic_id=item.topic_id,
-                metadata=item.metadata,
+        # Validate output doesn't contain garbage (JVM text, log output, etc.)
+        raw_str = str(result.raw_output) if hasattr(result, "raw_output") else ""
+        if "JVM" in raw_str or "Method overriding" in raw_str or "Tool #" in raw_str:
+            raise LLMTransientError(
+                "LLM returned garbage output (mixed content)",
+                retry_after_seconds=5,
+                model=self._model_id,
             )
-            for item in structured_output.questions[:count]
-        ]
-        if len(questions) != count:
-            raise LLMPermanentError(
-                "Strands returned an unexpected number of questions",
+
+        parsed_difficulty = _parse_difficulty(difficulty_level)
+        questions: list[QuestionDraft] = []
+        skipped_count = 0
+        for item in structured_output.questions[:count]:
+            # Skip questions without required fields
+            if item.question_text is None:
+                skipped_count += 1
+                continue
+            # Use placeholder if answer missing (legacy path) - 3-prompt workflow adds real answers
+            answer = item.answer_text or "[Answer to be generated]"
+            questions.append(
+                QuestionDraft(
+                    question_text=item.question_text,
+                    answer_text=answer,
+                    question_type=question_type,
+                    difficulty_level=parsed_difficulty,
+                    explanation=item.explanation,
+                    references=item.references,
+                    topic_id=item.topic_id,
+                    metadata={k: str(v) for k, v in (item.metadata or {}).items()},
+                )
+            )
+
+        if skipped_count > 0:
+            logger.warning(
+                "questions_skipped_missing_fields",
+                skipped=skipped_count,
                 expected=count,
-                actual=len(questions),
+                received=len(structured_output.questions),
+            )
+
+        if len(questions) == 0:
+            raise LLMPermanentError(
+                "No valid questions returned by LLM",
+                expected=count,
+                raw_preview=str(result.raw_output)[:500]
+                if hasattr(result, "raw_output")
+                else None,
             )
 
         prompt_version = (
@@ -326,6 +373,22 @@ class StrandsLLMProvider(LLMProvider):
         except (OpenAIError, OSError, TimeoutError) as error:
             logger.warning("llm_health_check_failed", error=str(error))
             return False
+
+    async def shutdown(self) -> None:
+        """Close the health check client and release resources.
+
+        This should be called during container shutdown to properly
+        close the AsyncOpenAI client connection pool.
+        """
+        try:
+            await self._health_client.close()
+            logger.debug("strands_provider_shutdown_complete")
+        except Exception as error:
+            logger.warning(
+                "strands_provider_shutdown_failed",
+                error=str(error),
+                error_type=type(error).__name__,
+            )
 
     async def generate_with_prompt(
         self,
@@ -386,24 +449,53 @@ class StrandsLLMProvider(LLMProvider):
                 model=self._model_id,
             )
 
-        questions = [
-            QuestionDraft(
-                question_text=item.question_text,
-                answer_text=item.answer_text,
-                question_type=qt,
-                difficulty_level=difficulty_level,
-                explanation=item.explanation,
-                references=item.references,
-                topic_id=item.topic_id,
-                metadata=item.metadata,
+        # Validate output doesn't contain garbage (JVM text, log output, etc.)
+        raw_str = str(result.raw_output) if hasattr(result, "raw_output") else ""
+        if "JVM" in raw_str or "Method overriding" in raw_str or "Tool #" in raw_str:
+            raise LLMTransientError(
+                "LLM returned garbage output (mixed content)",
+                retry_after_seconds=5,
+                model=self._model_id,
             )
-            for item in structured_output.questions[:count]
-        ]
-        if len(questions) != count:
-            raise LLMPermanentError(
-                "Strands returned an unexpected number of questions",
+
+        parsed_difficulty = _parse_difficulty(difficulty_level)
+        questions: list[QuestionDraft] = []
+        skipped_count = 0
+        for item in structured_output.questions[:count]:
+            # Skip questions without required fields
+            if item.question_text is None:
+                skipped_count += 1
+                continue
+            # Use placeholder if answer missing (legacy path) - 3-prompt workflow adds real answers
+            answer = item.answer_text or "[Answer to be generated]"
+            questions.append(
+                QuestionDraft(
+                    question_text=item.question_text,
+                    answer_text=answer,
+                    question_type=qt,
+                    difficulty_level=parsed_difficulty,
+                    explanation=item.explanation,
+                    references=item.references,
+                    topic_id=item.topic_id,
+                    metadata={k: str(v) for k, v in (item.metadata or {}).items()},
+                )
+            )
+
+        if skipped_count > 0:
+            logger.warning(
+                "questions_skipped_missing_fields",
+                skipped=skipped_count,
                 expected=count,
-                actual=len(questions),
+                received=len(structured_output.questions),
+            )
+
+        if len(questions) == 0:
+            raise LLMPermanentError(
+                "No valid questions returned by LLM",
+                expected=count,
+                raw_preview=str(result.raw_output)[:500]
+                if hasattr(result, "raw_output")
+                else None,
             )
 
         return QuestionBatch(

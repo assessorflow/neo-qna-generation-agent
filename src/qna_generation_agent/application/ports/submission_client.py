@@ -56,7 +56,7 @@ class QuestionSetRecord:
     workflow_id: str
     iteration_count: int
     status: str
-    created_at: datetime
+    created_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)

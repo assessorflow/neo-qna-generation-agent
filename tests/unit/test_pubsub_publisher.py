@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -438,3 +439,140 @@ class TestPubSubCompletionPublisher:
 
         assert client is not None
         assert publisher._client is not None
+
+    @pytest.mark.unit
+    async def test_get_client_thread_safe_initialization(self) -> None:
+        """Test that client initialization is thread-safe with asyncio.Lock."""
+        publisher = PubSubCompletionPublisher(
+            project_id="test-project",
+            topic_id="test-topic",
+        )
+
+        call_count = 0
+
+        async def mock_to_thread(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.01)  # Simulate slow initialization
+            return FakePublisherClient()
+
+        with patch(
+            "qna_generation_agent.infrastructure.messaging.pubsub_publisher.asyncio.to_thread",
+            side_effect=mock_to_thread,
+        ):
+            # Simulate concurrent access
+            clients = await asyncio.gather(
+                publisher._get_client(),
+                publisher._get_client(),
+                publisher._get_client(),
+            )
+
+        # All should return the same client
+        assert clients[0] is clients[1] is clients[2]
+        # Initialization should only happen once
+        assert call_count == 1
+
+    @pytest.mark.unit
+    async def test_publish_decision_audit_preserves_full_summary(self) -> None:
+        """Test that decision audit preserves full input/output summaries."""
+        publisher = PubSubCompletionPublisher(
+            project_id="test-project",
+            topic_id="test-topic",
+            decision_audit_topic_id="audit-topic",
+        )
+        fake_client = FakePublisherClient()
+        publisher._client = fake_client
+
+        event = DecisionAuditEvent(
+            workflow_id="wf_123",
+            input_summary={
+                "question_set_id": "qs_123",
+                "iteration": 2,
+                "extra_field": "preserved",  # Extra fields should be in dict
+            },
+            output_summary={
+                "result": "fail",
+                "issues_found": 3,
+                "details": "preserved_detail",  # Extra fields should be in dict
+            },
+            reasoning_steps=["step1", "step2"],
+            confidence_score=0.85,
+            prompt_version="v2",
+            model_id="gpt-4o",
+            grounding_sources=["chunk1", "chunk2"],
+        )
+
+        await publisher.publish_decision_audit(event)
+
+        assert len(fake_client.published) == 1
+        published_data = fake_client.published[0]["data"]
+        import orjson
+
+        envelope_data = orjson.loads(published_data)
+        payload = envelope_data["payload"]
+
+        # Verify core fields preserved
+        assert payload["input_summary"]["question_set_id"] == "qs_123"
+        assert payload["input_summary"]["iteration"] == 2
+        assert payload["output_summary"]["result"] == "fail"
+        assert payload["output_summary"]["issues_found"] == 3
+        assert payload["confidence_score"] == 0.85
+
+    @pytest.mark.unit
+    async def test_publish_decision_audit_handles_network_errors(self) -> None:
+        """Test that decision audit handles network errors gracefully."""
+        publisher = PubSubCompletionPublisher(
+            project_id="test-project",
+            topic_id="test-topic",
+            decision_audit_topic_id="audit-topic",
+        )
+        fake_client = FakePublisherClient()
+
+        def raise_connection_error(*args, **kwargs):
+            raise ConnectionError("Network unreachable")
+
+        fake_client.publish = raise_connection_error  # type: ignore[method-assign]
+        publisher._client = fake_client
+
+        event = DecisionAuditEvent(
+            workflow_id="wf_123",
+            input_summary={"question_set_id": "qs_123", "iteration": 1},
+            output_summary={"result": "pass", "issues_found": 0},
+            reasoning_steps=["step1"],
+            confidence_score=0.9,
+            prompt_version="v1",
+            model_id="gpt-4o",
+            grounding_sources=["chunk1"],
+        )
+
+        # Should not raise - best effort degradation
+        await publisher.publish_decision_audit(event)
+
+    @pytest.mark.unit
+    async def test_publish_token_usage_handles_network_errors(self) -> None:
+        """Test that token usage handles network errors gracefully."""
+        publisher = PubSubCompletionPublisher(
+            project_id="test-project",
+            topic_id="test-topic",
+            token_usage_topic_id="token-topic",
+        )
+        fake_client = FakePublisherClient()
+
+        def raise_timeout_error(*args, **kwargs):
+            raise TimeoutError("Publish timed out")
+
+        fake_client.publish = raise_timeout_error  # type: ignore[method-assign]
+        publisher._client = fake_client
+
+        event = TokenUsageEvent(
+            workflow_id="wf_123",
+            model_id="gpt-4o",
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+            estimated_cost_usd=0.001,
+            prompt_version="v1",
+        )
+
+        # Should not raise - best effort degradation
+        await publisher.publish_token_usage(event)

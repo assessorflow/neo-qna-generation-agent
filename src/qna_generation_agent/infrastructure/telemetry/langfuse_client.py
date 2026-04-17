@@ -115,4 +115,11 @@ class LangfuseTelemetry(TelemetryPort):
             logger.warning(
                 "langfuse_flush_failed", error=str(e), error_type=type(e).__name__
             )
-        await asyncio.to_thread(self._client.shutdown)
+        try:
+            await asyncio.to_thread(self._client.shutdown)
+        except Exception as e:
+            logger.warning(
+                "langfuse_shutdown_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+            )

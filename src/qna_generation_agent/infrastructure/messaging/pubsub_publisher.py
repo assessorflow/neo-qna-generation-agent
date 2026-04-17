@@ -72,11 +72,19 @@ class PubSubCompletionPublisher(EventPublisher):
         self._decision_audit_topic_id = decision_audit_topic_id
         self._token_usage_topic_id = token_usage_topic_id
         self._client: PublisherClient | None = None
+        self._client_lock = asyncio.Lock()
 
     async def _get_client(self) -> PublisherClient:
-        """Lazy initialization of the publisher client."""
+        """Lazy initialization of the publisher client.
+
+        Thread-safe: uses asyncio.Lock to prevent race conditions
+        during first initialization.
+        """
         if self._client is None:
-            self._client = await asyncio.to_thread(PublisherClient)
+            async with self._client_lock:
+                # Double-check after acquiring lock
+                if self._client is None:
+                    self._client = await asyncio.to_thread(PublisherClient)
         return self._client
 
     def _get_topic_path(self, client: PublisherClient, topic_id: str) -> str:
@@ -118,20 +126,29 @@ class PubSubCompletionPublisher(EventPublisher):
             ) from error
 
     async def publish_decision_audit(self, event: DecisionAuditEvent) -> None:
-        """Publish decision audit event per spec."""
+        """Publish decision audit event per spec.
+
+        Best-effort: failures are logged but not raised to prevent
+        disrupting the main workflow. Full input/output summaries
+        are preserved from the validated event.
+        """
         if not self._decision_audit_topic_id:
             return
 
+        # Preserve full input/output summaries from validated event
+        input_summary = DecisionAuditInputSummary(
+            question_set_id=event.input_summary.get("question_set_id", ""),
+            iteration=event.input_summary.get("iteration", 1),
+        )
+        output_summary = DecisionAuditOutputSummary(
+            result=event.output_summary.get("result", "pass"),
+            issues_found=event.output_summary.get("issues_found", 0),
+        )
+
         payload = DecisionAuditPayload(
             workflow_id=event.workflow_id,
-            input_summary=DecisionAuditInputSummary(
-                question_set_id=event.input_summary.get("question_set_id", ""),
-                iteration=event.input_summary.get("iteration", 1),
-            ),
-            output_summary=DecisionAuditOutputSummary(
-                result=event.output_summary.get("result", "pass"),
-                issues_found=event.output_summary.get("issues_found", 0),
-            ),
+            input_summary=input_summary,
+            output_summary=output_summary,
             reasoning_steps=event.reasoning_steps,
             confidence_score=event.confidence_score,
             prompt_version=event.prompt_version,
@@ -153,11 +170,25 @@ class PubSubCompletionPublisher(EventPublisher):
                 **attributes,
             )
             await asyncio.to_thread(future.result, 30.0)
-        except Exception:
-            logger.exception("decision_audit_publish_failed")
+            logger.debug("decision_audit_published", workflow_id=event.workflow_id)
+        except (OSError, TimeoutError, ConnectionError) as e:
+            # Network-level errors during publish - best effort failed
+            logger.error("decision_audit_publish_failed_network", error=str(e))
+        except Exception as e:
+            # Other publish failures - best effort, log and continue
+            logger.warning(
+                "decision_audit_publish_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                workflow_id=event.workflow_id,
+            )
 
     async def publish_token_usage(self, event: TokenUsageEvent) -> None:
-        """Publish token usage audit event per spec."""
+        """Publish token usage audit event per spec.
+
+        Best-effort: failures are logged but not raised to prevent
+        disrupting the main workflow.
+        """
         if not self._token_usage_topic_id:
             return
 
@@ -185,8 +216,18 @@ class PubSubCompletionPublisher(EventPublisher):
                 **attributes,
             )
             await asyncio.to_thread(future.result, 30.0)
-        except Exception:
-            logger.exception("token_usage_publish_failed")
+            logger.debug("token_usage_published", workflow_id=event.workflow_id)
+        except (OSError, TimeoutError, ConnectionError) as e:
+            # Network-level errors during publish - best effort failed
+            logger.error("token_usage_publish_failed_network", error=str(e))
+        except Exception as e:
+            # Other publish failures - best effort, log and continue
+            logger.warning(
+                "token_usage_publish_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                workflow_id=event.workflow_id,
+            )
 
     async def close(self) -> None:
         """Close the publisher client."""

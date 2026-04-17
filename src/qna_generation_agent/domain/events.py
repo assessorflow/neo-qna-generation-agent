@@ -32,6 +32,7 @@ class QnAGenerationTriggered:
     purpose: str | None  # Nullable for regeneration
     feedback_issues: list[str]  # For regeneration feedback
     correlation_id: str
+    trace_id: str | None = None  # For distributed tracing propagation
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

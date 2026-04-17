@@ -29,6 +29,11 @@ from qna_generation_agent.application.ports.idempotency import (
     IdempotencyStatus,
     IdempotencyStore,
 )
+from qna_generation_agent.application.ports.knowledge_client import (
+    GetTopicsCommand,
+    KnowledgeClient,
+    SimilaritySearchCommand,
+)
 from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.application.ports.prompt_provider import PromptProvider
 from qna_generation_agent.application.ports.publisher import (
@@ -39,6 +44,7 @@ from qna_generation_agent.application.ports.publisher import (
 from qna_generation_agent.application.ports.repository import QuestionSetRepository
 from qna_generation_agent.application.ports.submission_client import (
     CreateQuestionSetCommand,
+    GetAssessmentConfigCommand,
     IncrementIterationCommand,
     Question,
     SubmissionClient,
@@ -53,14 +59,9 @@ from qna_generation_agent.domain.entities import (
 from qna_generation_agent.domain.entities import (
     Question as DomainQuestion,
 )
-from qna_generation_agent.domain.enums import QuestionType
+from qna_generation_agent.domain.enums import GenerationStatus, QuestionType
 from qna_generation_agent.domain.events import QnAGenerationCompleted
 from qna_generation_agent.domain.value_objects import AnswerId, QuestionId
-from qna_generation_agent.infrastructure.grpc.knowledge_client import (
-    GetTopicsCommand,
-    GrpcKnowledgeClient,
-    SimilaritySearchCommand,
-)
 
 logger = get_logger(__name__)
 
@@ -84,7 +85,7 @@ class GenerateQnAService:
         idempotency_store: IdempotencyStore,
         event_publisher: EventPublisher,
         submission_client: SubmissionClient,
-        knowledge_client: GrpcKnowledgeClient,
+        knowledge_client: KnowledgeClient,
         telemetry: TelemetryPort | None = None,
         max_iterations: int = 3,
         prompt_provider: PromptProvider | None = None,
@@ -144,11 +145,8 @@ class GenerateQnAService:
 
             try:
                 receipt = await self._generate(command)
-                await self._idempotency_store.complete(
-                    command.request_id,
-                    receipt=receipt,
-                    ttl_seconds=86400,
-                )
+                # Idempotency is marked complete inside _generate() immediately after
+                # successful write to prevent duplicate-write hazard on retry
                 return receipt
             except (
                 StorageTransientError,
@@ -191,8 +189,6 @@ class GenerateQnAService:
         )
 
         # Early validation: Check max iterations for regeneration flow
-        # This prevents expensive operations (topic/chunk retrieval) when
-        # we've already exceeded the iteration limit
         if command.question_set_id and command.validation_result == "fail":
             next_iteration = (command.iteration or 1) + 1
             if next_iteration > self._max_iterations:
@@ -233,14 +229,17 @@ class GenerateQnAService:
             ) from error
 
         # Step 2: Select subtopics based on question count and difficulty
-        # Note: Using trigger payload data since GetAssessmentConfig is not yet available
-        total_count = (command.structured_count or 0) + (
-            command.non_structured_count or 0
-        )
+        # For regeneration, fetch authoritative config from Submission Service
+        generation_config = await self._resolve_generation_config(command)
+        total_count = generation_config["total_count"]
+        difficulty_level = generation_config["difficulty_level"]
+        structured_count = generation_config["structured_count"]
+        non_structured_count = generation_config["non_structured_count"]
+
         subtopics = self._select_subtopics(
             topics,
             total_count=total_count,
-            difficulty_level=command.difficulty_level,
+            difficulty_level=difficulty_level,
         )
         logger.info(
             "subtopics_selected",
@@ -274,7 +273,7 @@ class GenerateQnAService:
                     "knowledge_service_similarity_search_response",
                     subtopic=subtopic.name,
                     chunks_retrieved=chunk_count,
-                    chunk_previews=[c.content[:100] for c in chunks[:3]],
+                    chunk_ids=[c.chunk_id for c in chunks[:5]],
                 )
                 for chunk in chunks:
                     all_chunks.append(chunk.content)
@@ -378,6 +377,7 @@ class GenerateQnAService:
                 ) from error
 
         # Create local question set for tracking
+        # Use resolved generation config (loaded from Submission Service for regeneration)
         request = GenerationRequest(
             id=command.request_id,
             workflow_id=command.workflow_id,
@@ -385,9 +385,9 @@ class GenerateQnAService:
             assessment_id=command.assessment_id,
             validation_result=command.validation_result,
             iteration=iteration,
-            structured_count=command.structured_count,
-            non_structured_count=command.non_structured_count,
-            difficulty_level=command.difficulty_level,
+            structured_count=structured_count,
+            non_structured_count=non_structured_count,
+            difficulty_level=difficulty_level,
             purpose=command.purpose,
         )
 
@@ -411,7 +411,6 @@ class GenerateQnAService:
             assessment_id=request.assessment_id,
             chunk_count=len(context.chunks),
             topic_ids=context.topic_ids,
-            chunk_previews=[c[:200] for c in context.chunks[:3]],
         )
 
         # Include feedback in generation if present (logged for now, TODO: pass to LLM)
@@ -464,7 +463,6 @@ class GenerateQnAService:
                 logger.info(
                     "llm_generate_structured_complete",
                     generated_count=len(questions),
-                    questions_preview=[q.text[:100] for q in questions[:3]],
                 )
                 return questions, prompt_version
             except (LLMTransientError, LLMPermanentError):
@@ -504,7 +502,7 @@ class GenerateQnAService:
 
                     prompt_obj = await self._prompt_provider.get_prompt(
                         "Assessment Generator",
-                        label="latest",
+                        label=self._prompt_provider.default_label,
                     )
                     # Track prompt version for audit
                     prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
@@ -517,9 +515,7 @@ class GenerateQnAService:
                     compiled_prompt = prompt_obj.compile(**input_data.model_dump())
                     logger.info(
                         "llm_generate_non_structured_prompt_compiled",
-                        prompt_preview=compiled_prompt[:500]
-                        if isinstance(compiled_prompt, str)
-                        else str(compiled_prompt)[:500],
+                        prompt_version=prompt_version,
                         prompt_length=len(compiled_prompt)
                         if isinstance(compiled_prompt, str)
                         else len(str(compiled_prompt)),
@@ -627,10 +623,28 @@ class GenerateQnAService:
             "submission_service_write_generated_questions_request",
             question_set_id=question_set_id,
             question_count=len(questions_for_submission),
-            questions_preview=[
-                {"id": q.question_id, "text": q.content[:50]}
-                for q in questions_for_submission[:3]
-            ],
+        )
+
+        # Build receipt early for idempotency completion immediately after write
+        # Use trace_id from command (propagated from inbound event) first,
+        # then fall back to telemetry if available
+        trace_id = command.trace_id or (
+            self._telemetry.current_trace_id() if self._telemetry is not None else None
+        )
+        receipt = GenerationReceipt(
+            question_set_id=question_set.id,
+            assessment_id=question_set.assessment_id,
+            structured_generated=structured_generated,
+            non_structured_generated=non_structured_generated,
+            iteration=question_set.iteration,
+            question_count=len(question_set.questions),
+            status=GenerationStatus.COMPLETED,
+            trace_id=trace_id,
+            trace_url=(
+                self._telemetry.current_trace_url()
+                if self._telemetry is not None
+                else None
+            ),
         )
 
         try:
@@ -660,6 +674,20 @@ class GenerateQnAService:
                 question_set_id=question_set_id,
             ) from error
 
+        # CRITICAL: Mark idempotency complete IMMEDIATELY after successful write.
+        # This prevents duplicate writes on retry if subsequent operations fail.
+        # All operations after this point are best-effort (events, audit logs).
+        await self._idempotency_store.complete(
+            command.request_id,
+            receipt=receipt,
+            ttl_seconds=86400,
+        )
+        logger.info(
+            "idempotency_marked_complete",
+            request_id=command.request_id,
+            question_set_id=question_set_id,
+        )
+
         question_set.mark_completed()
         await self._question_set_repo.save(question_set)
         logger.info(
@@ -668,26 +696,8 @@ class GenerateQnAService:
             assessment_id=question_set.assessment_id,
         )
 
-        # Step 8: Publish completion + audit events
-        # Spec 5.11: Q&A Generation Complete event
-        trace_id = (
-            self._telemetry.current_trace_id() if self._telemetry is not None else None
-        )
-        receipt = GenerationReceipt(
-            question_set_id=question_set.id,
-            assessment_id=question_set.assessment_id,
-            structured_generated=structured_generated,
-            non_structured_generated=non_structured_generated,
-            iteration=question_set.iteration,
-            question_count=len(question_set.questions),
-            status=question_set.status.value,
-            trace_id=trace_id,
-            trace_url=(
-                self._telemetry.current_trace_url()
-                if self._telemetry is not None
-                else None
-            ),
-        )
+        # Step 8: Publish completion + audit events (BEST-EFFORT ONLY)
+        # These must not affect idempotency - duplicates here are acceptable
         logger.info(
             "generation_receipt_created",
             question_set_id=receipt.question_set_id,
@@ -781,6 +791,75 @@ class GenerateQnAService:
 
         return receipt
 
+    async def _resolve_generation_config(
+        self, command: GenerationCommand
+    ) -> dict[str, Any]:
+        """Resolve generation configuration for initial or regeneration flow.
+
+        For regeneration (is_regeneration=True), fetches authoritative config
+        from Submission Service. For initial generation, uses trigger payload.
+
+        Returns:
+            Dict with structured_count, non_structured_count, total_count,
+            and difficulty_level.
+        """
+        is_regeneration = (
+            command.question_set_id is not None
+            and command.validation_result == "fail"
+            and command.question_set_id != ""
+        )
+
+        if is_regeneration:
+            logger.info(
+                "regeneration_config_fetch",
+                assessment_id=command.assessment_id,
+                workflow_id=command.workflow_id,
+            )
+            try:
+                config = await self._submission_client.get_assessment_config(
+                    GetAssessmentConfigCommand(
+                        assessment_id=command.assessment_id,
+                        workflow_id=command.workflow_id,
+                    )
+                )
+                structured_count = config.structured_question_count
+                non_structured_count = config.non_structured_question_count
+                difficulty_level = config.difficulty_level
+                logger.info(
+                    "regeneration_config_loaded",
+                    assessment_id=command.assessment_id,
+                    structured_count=structured_count,
+                    non_structured_count=non_structured_count,
+                    difficulty_level=difficulty_level,
+                )
+            except StoragePermanentError as e:
+                # GetAssessmentConfig not implemented yet - fall back to trigger data
+                # This preserves backward compatibility during proto rollout
+                logger.warning(
+                    "regeneration_config_fallback_to_trigger",
+                    assessment_id=command.assessment_id,
+                    error=str(e),
+                )
+                structured_count = command.structured_count or 0
+                non_structured_count = command.non_structured_count or 0
+                difficulty_level = command.difficulty_level
+            except StorageTransientError:
+                raise  # Retryable errors should be retried
+        else:
+            # Initial generation: use trigger payload
+            structured_count = command.structured_count or 0
+            non_structured_count = command.non_structured_count or 0
+            difficulty_level = command.difficulty_level
+
+        total_count = structured_count + non_structured_count
+
+        return {
+            "structured_count": structured_count,
+            "non_structured_count": non_structured_count,
+            "total_count": total_count,
+            "difficulty_level": difficulty_level,
+        }
+
     def _select_subtopics(
         self,
         topics: list[Any],
@@ -871,20 +950,15 @@ class GenerateQnAService:
 
         prompt_obj = await self._prompt_provider.get_prompt(
             "Assessment Generator",
-            label="latest",
+            label=self._prompt_provider.default_label,
         )
 
-        # Debug: Log raw prompt object
+        # Debug: Log prompt metadata only
         logger.info(
-            "prompt_1_raw_object",
+            "prompt_1_metadata",
             prompt_name=prompt_obj.name,
+            prompt_version=prompt_obj.version,
             is_chat=prompt_obj.is_chat_prompt(),
-            has_prompt_text=prompt_obj.prompt_text is not None,
-            prompt_text_preview=prompt_obj.prompt_text[:200]
-            if prompt_obj.prompt_text
-            else None,
-            has_chat_messages=prompt_obj.chat_messages is not None,
-            chat_count=len(prompt_obj.chat_messages) if prompt_obj.chat_messages else 0,
         )
 
         input_data = AssessmentGeneratorInputSchema.from_context(
@@ -894,25 +968,25 @@ class GenerateQnAService:
             difficulty_level=difficulty_level,
         )
 
-        # Debug: Log what variables we're sending to the prompt
+        # Log prompt variables metadata only
         input_dump = input_data.model_dump()
         logger.info(
             "prompt_1_variables",
             structured_count=input_dump["structured_count"],
             non_structured_count=input_dump["non_structured_count"],
             difficulty=input_dump["difficulty"],
-            topics_preview=input_dump["topics"][:100],
-            chunks_count=len(input_dump["chunks"]),
+            topics_count=len(context.topic_ids),
+            chunks_count=len(context.chunks),
         )
 
         compiled = prompt_obj.compile(**input_dump)
 
-        # Debug: Log raw compiled result
+        # Log compilation metadata only
         logger.info(
-            "prompt_1_compiled_raw",
+            "prompt_1_compiled",
             compiled_type=type(compiled).__name__,
-            is_list=isinstance(compiled, list),
-            is_str=isinstance(compiled, str),
+            prompt_name=prompt_obj.name,
+            prompt_version=prompt_obj.version,
         )
 
         # Handle both text prompts (str) and chat prompts (list of dicts)
@@ -928,7 +1002,8 @@ class GenerateQnAService:
 
         logger.info(
             "prompt_1_assessment_generator_compiled",
-            prompt_preview=prompt_str[:300],
+            prompt_name=prompt_obj.name,
+            prompt_version=prompt_obj.version,
             prompt_length=len(prompt_str),
         )
 
@@ -945,21 +1020,11 @@ class GenerateQnAService:
                 model=self._llm_provider.model_id,
             )
 
-        # Log prompt 1 results with full details
+        # Log prompt 1 completion metadata only
         logger.info(
             "prompt_1_assessment_generator_complete",
             questions_generated=len(initial_result.questions),
-            questions_details=[
-                {
-                    "id": q.question_id,
-                    "type": q.question_type,
-                    "content": q.content,
-                    "structured_answer": q.structured_answer,
-                    "non_structured_model_answer": q.non_structured_model_answer,
-                    "metadata": q.metadata,
-                }
-                for q in initial_result.questions[:count]
-            ],
+            question_types=[q.question_type for q in initial_result.questions[:count]],
         )
 
         # Step 2 & 3: For each structured question, generate MCQ answers and explanations
@@ -978,12 +1043,21 @@ class GenerateQnAService:
             # Step 2: MCQ Answer Generator
             logger.info("prompt_2_mcq_answer_generator_started", question_index=idx)
 
+            # Validator ensures question_text/content is set, but mypy doesn't know
+            question_stem = question.question_text or question.content
+            if not question_stem:
+                logger.warning(
+                    "skipping_question_no_stem",
+                    question_id=question.question_id,
+                )
+                continue
+
             answer_prompt_obj = await self._prompt_provider.get_prompt(
                 "MCQ Answer Generator",
-                label="latest",
+                label=self._prompt_provider.default_label,
             )
             answer_input = MCQAnswerInputSchema(
-                question_stem=question.content,
+                question_stem=question_stem,
                 grammar_target="general grammar",  # Could be extracted from metadata
                 difficulty=difficulty_level or "medium",
                 l1_background="Mixed",  # Could be configured
@@ -1016,28 +1090,12 @@ class GenerateQnAService:
                 )
                 continue
 
-            # Log prompt 2 full results
+            # Log prompt 2 completion metadata only
             logger.info(
                 "prompt_2_mcq_answer_generator_complete",
                 question_index=idx,
-                question_stem=answer_result.question_stem,
-                correct_answer={
-                    "letter": answer_result.correct_answer.option_letter,
-                    "text": answer_result.correct_answer.option_text,
-                    "explanation": answer_result.correct_answer.explanation,
-                },
-                distractors=[
-                    {
-                        "letter": d.option_letter,
-                        "text": d.option_text,
-                        "explanation": d.explanation,
-                        "l1_note": d.l1_interference_note,
-                    }
-                    for d in answer_result.distractors
-                ],
-                grammar_point=answer_result.grammar_point_tested,
-                difficulty_justification=answer_result.difficulty_justification,
-                l1_considerations=answer_result.l1_considerations,
+                correct_letter=answer_result.correct_answer.option_letter,
+                distractor_count=len(answer_result.distractors),
             )
 
             # Step 3: MCQ Explanation Generator
@@ -1047,16 +1105,15 @@ class GenerateQnAService:
 
             explanation_prompt_obj = await self._prompt_provider.get_prompt(
                 "MCQ Explanation Generator",
-                label="latest",
+                label=self._prompt_provider.default_label,
             )
 
-            # Build options dict from answer result
-            options_dict = {
-                "A": answer_result.correct_answer.option_text,
-            }
-            for i, distractor in enumerate(answer_result.distractors):
-                option_letter = chr(ord("B") + i)  # B, C, D
-                options_dict[option_letter] = distractor.option_text
+            # Build options dict from answer result - preserving actual option letters
+            options_dict: dict[str, str] = {}
+            correct_letter = answer_result.correct_answer.option_letter
+            options_dict[correct_letter] = answer_result.correct_answer.option_text
+            for distractor in answer_result.distractors:
+                options_dict[distractor.option_letter] = distractor.option_text
 
             explanation_input = MCQExplanationInputSchema(
                 question=answer_result.question_stem,
@@ -1089,23 +1146,12 @@ class GenerateQnAService:
             )
 
             if explanation_result:
-                # Log prompt 3 full results
+                # Log prompt 3 completion metadata only
                 logger.info(
                     "prompt_3_mcq_explanation_generator_complete",
                     question_index=idx,
-                    question_analysis=explanation_result.question_analysis,
                     cefr_level=explanation_result.cefr_level,
-                    teaching_tip=explanation_result.teaching_tip,
-                    option_explanations=[
-                        {
-                            "letter": opt.option_letter,
-                            "text": opt.option_text,
-                            "is_correct": opt.is_correct,
-                            "explanation": opt.explanation,
-                            "l1_interference": opt.l1_interference_note,
-                        }
-                        for opt in explanation_result.option_explanations
-                    ],
+                    option_count=len(explanation_result.option_explanations),
                 )
             else:
                 logger.warning(
@@ -1114,14 +1160,16 @@ class GenerateQnAService:
                 )
 
             # Combine all results into final question
-            # Build clear MCQ options display
+            # Build clear MCQ options display preserving actual option letters
             correct_letter = answer_result.correct_answer.option_letter
             combined_answer_parts = [
                 f"Question: {answer_result.question_stem}",
                 "",
                 "Options:",
             ]
-            for letter, text in options_dict.items():
+            # Sort by letter for consistent display while preserving actual letters
+            for letter in sorted(options_dict.keys()):
+                text = options_dict[letter]
                 marker = " ✓ CORRECT" if letter == correct_letter else ""
                 combined_answer_parts.append(f"  {letter}) {text}{marker}")
             combined_answer_parts.append("")
