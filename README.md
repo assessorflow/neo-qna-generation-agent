@@ -148,7 +148,6 @@ pip install -e ".[dev,test,lint]"
 | `KNOWLEDGE_SERVICE_URL` | Yes | - | gRPC URL for knowledge service |
 | `HOST` | No | `0.0.0.0` | HTTP server host |
 | `PORT` | No | `8000` | HTTP server port |
-| `WORKERS` | No | `1` | **Hardcoded to 1** — HTTP and Pub/Sub run in a single unified process |
 | `LOG_LEVEL` | No | `info` | Logging level |
 | `PUBSUB_PROJECT_ID` | No | - | GCP project ID |
 | `PUBSUB_SUBSCRIPTION_TRIGGER` | No | - | Pub/Sub subscription name |
