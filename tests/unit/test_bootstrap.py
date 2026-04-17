@@ -19,7 +19,6 @@ def set_minimal_env(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com")
     monkeypatch.setenv("SUBMISSION_SERVICE_URL", "grpc://localhost:50051")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "grpc://localhost:50052")
-    monkeypatch.setenv("IDENTITY_ACCESS_SERVICE_URL", "grpc://localhost:50053")
 
 
 @pytest.mark.unit
@@ -47,7 +46,6 @@ class TestSettingsValidation:
         monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com")
         monkeypatch.setenv("SUBMISSION_SERVICE_URL", "grpc://localhost:50051")
         monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "grpc://localhost:50052")
-        monkeypatch.setenv("IDENTITY_ACCESS_SERVICE_URL", "grpc://localhost:50053")
         monkeypatch.setenv("PUBSUB_PROJECT_ID", "test-project")
         monkeypatch.setenv("PUBSUB_SUBSCRIPTION_TRIGGER", "test-sub")
         monkeypatch.setenv("PUBSUB_TOPIC_COMPLETE", "test-topic")
@@ -257,6 +255,18 @@ class TestBootstrapContainer:
 
         assert container.telemetry is None
 
+    def test_build_container_deprecated_workflow_mode_ignored(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """LLM_WORKFLOW_MODE is deprecated and has no effect - always uses standard provider."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("LLM_WORKFLOW_MODE", "true")
+
+        settings = Settings()  # type: ignore[call-arg]
+        # Should succeed and use StrandsLLMProvider (not raise ConfigurationError)
+        container = _build_container(settings)
+        assert container.llm_provider is not None
+
 
 @pytest.mark.unit
 class TestValidateHost:
@@ -273,3 +283,109 @@ class TestValidateHost:
         settings = Settings()  # type: ignore[call-arg]
         with pytest.raises(ConfigurationError):
             settings.validate_settings()
+
+
+@pytest.mark.unit
+class TestSettingsWorkerValidation:
+    """Tests for strict worker validation."""
+
+    def test_rejects_workers_greater_than_1(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation rejects workers > 1."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("WORKERS", "4")
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "workers must be 1" in str(exc_info.value)
+
+    def test_rejects_pubsub_max_workers_greater_than_1(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Settings validation rejects pubsub_max_workers > 1."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("PUBSUB_MAX_WORKERS", "4")
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "pubsub_max_workers must be 1" in str(exc_info.value)
+
+    def test_accepts_single_worker(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation accepts workers=1."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("WORKERS", "1")
+        monkeypatch.setenv("PUBSUB_MAX_WORKERS", "1")
+
+        settings = Settings()  # type: ignore[call-arg]
+        assert settings.workers == 1
+        assert settings.pubsub_max_workers == 1
+
+
+@pytest.mark.unit
+class TestSettingsTimeoutValidation:
+    """Tests for timeout bounds validation."""
+
+    def test_rejects_llm_timeout_below_minimum(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation rejects LLM timeout below 30 seconds."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "10")  # Below minimum of 30
+
+        with pytest.raises(ValueError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "LLM_TIMEOUT_SECONDS" in str(exc_info.value)
+
+    def test_rejects_llm_timeout_above_maximum(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation rejects LLM timeout above 600 seconds."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "700")  # Above maximum of 600
+
+        with pytest.raises(ValueError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "LLM_TIMEOUT_SECONDS" in str(exc_info.value)
+
+    def test_rejects_grpc_timeout_below_minimum(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation rejects gRPC timeout below 5 seconds."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("GRPC_TIMEOUT_SECONDS", "1")  # Below minimum of 5
+
+        with pytest.raises(ValueError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "GRPC_TIMEOUT_SECONDS" in str(exc_info.value)
+
+    def test_rejects_grpc_timeout_above_maximum(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation rejects gRPC timeout above 120 seconds."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("GRPC_TIMEOUT_SECONDS", "200")  # Above maximum of 120
+
+        with pytest.raises(ValueError) as exc_info:
+            Settings()  # type: ignore[call-arg]
+        assert "GRPC_TIMEOUT_SECONDS" in str(exc_info.value)
+
+    def test_accepts_valid_timeouts(self, monkeypatch: MonkeyPatch) -> None:
+        """Settings validation accepts valid timeout values."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("GRPC_TIMEOUT_SECONDS", "30")
+
+        settings = Settings()  # type: ignore[call-arg]
+        assert settings.llm_timeout_seconds == 60
+        assert settings.grpc_timeout_seconds == 30
+
+
+@pytest.mark.unit
+class TestSettingsTestRoutesPrerequisites:
+    """Tests for ENABLE_TEST_ROUTES prerequisites."""
+
+    def test_enable_test_routes_requires_langfuse(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """ENABLE_TEST_ROUTES requires Langfuse to be configured."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("ENABLE_TEST_ROUTES", "true")
+        # Explicitly clear Langfuse keys from .env file
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+
+        settings = Settings()  # type: ignore[call-arg]
+        # Settings should load but prompt_test_service won't be created
+        assert settings.enable_test_routes is True
+        assert settings.langfuse_enabled is False

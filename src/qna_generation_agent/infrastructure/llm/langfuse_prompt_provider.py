@@ -36,16 +36,10 @@ class LangfusePromptProvider(PromptProvider):
         host: str,
         environment: str,
         release: str | None = None,
+        default_label: str = "production",
     ) -> None:
-        """Initialize the Langfuse client for prompt management.
-
-        Args:
-            public_key: Langfuse public key.
-            secret_key: Langfuse secret key.
-            host: Langfuse host URL.
-            environment: Deployment environment.
-            release: Optional release version.
-        """
+        """Initialize the Langfuse client for prompt management."""
+        self._default_label = default_label
         self._client = Langfuse(
             public_key=public_key,
             secret_key=secret_key,
@@ -57,6 +51,7 @@ class LangfusePromptProvider(PromptProvider):
             "langfuse_prompt_provider_initialized",
             host=host,
             environment=environment,
+            default_label=default_label,
         )
 
     @observe(name="get_prompt", as_type="generation")
@@ -67,16 +62,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch a prompt from Langfuse.
-
-        Args:
-            name: The prompt name.
-            label: Optional label (production, latest, etc.).
-            version: Optional specific version.
-
-        Returns:
-            The fetched prompt.
-        """
+        """Fetch a prompt from Langfuse."""
         # Bind trace_id to structlog context for correlation
         trace_id = self._client.get_current_trace_id()
         if trace_id:
@@ -150,25 +136,16 @@ class LangfusePromptProvider(PromptProvider):
                 config=config,
             )
 
-            # Debug: Log prompt format and raw content
+            # Log prompt metadata only (no raw content)
             logger.info(
                 "langfuse_prompt_fetched",
                 name=name,
                 version=version_num,
                 label=label,
                 is_chat=prompt.is_chat_prompt(),
-                has_prompt_text=prompt_text is not None and len(prompt_text) > 0
-                if prompt_text
-                else False,
-                prompt_text_preview=prompt_text[:200] if prompt_text else None,
-                has_chat_messages=chat_messages is not None and len(chat_messages) > 0
-                if chat_messages
-                else False,
-                chat_messages_count=len(chat_messages) if chat_messages else 0,
             )
 
             return prompt
-
         except Exception as error:
             error_msg = str(error).lower()
             if "not found" in error_msg or "does not exist" in error_msg:
@@ -187,13 +164,13 @@ class LangfusePromptProvider(PromptProvider):
                 error=str(error),
             ) from error
 
-    async def shutdown(self) -> None:
-        """Flush and shutdown the Langfuse client.
+    @property
+    def default_label(self) -> str:
+        """Return the default label for prompt fetches."""
+        return self._default_label
 
-        Per Langfuse 4.2 SDK, flush() must be called to ensure all
-        telemetry (prompt fetch traces) is persisted before process exit.
-        shutdown() must also be called to release resources.
-        """
+    async def shutdown(self) -> None:
+        """Flush and shutdown the Langfuse client."""
         try:
             await asyncio.to_thread(self._client.flush)
         except (OSError, TimeoutError, ConnectionError) as e:
@@ -216,11 +193,7 @@ class LangfusePromptProvider(PromptProvider):
             )
 
     async def health_check(self) -> bool:
-        """Check connectivity to Langfuse prompt management.
-
-        Attempts to fetch a known prompt to verify connectivity.
-        Returns True if successful.
-        """
+        """Check connectivity to Langfuse prompt management."""
         try:
             # Try to fetch Assessment Generator as health check
             await asyncio.to_thread(self._client.get_prompt, self.ASSESSMENT_GENERATOR)
@@ -238,15 +211,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the Assessment Generator prompt.
-
-        Args:
-            label: Optional label (production, latest, etc.).
-            version: Optional specific version.
-
-        Returns:
-            The Assessment Generator prompt.
-        """
+        """Fetch the Assessment Generator prompt."""
         return await self.get_prompt(
             self.ASSESSMENT_GENERATOR,
             label=label,
@@ -259,15 +224,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the MCQ Explanation Generator prompt.
-
-        Args:
-            label: Optional label (production, latest, etc.).
-            version: Optional specific version.
-
-        Returns:
-            The MCQ Explanation Generator prompt.
-        """
+        """Fetch the MCQ Explanation Generator prompt."""
         return await self.get_prompt(
             self.MCQ_EXPLANATION_GENERATOR,
             label=label,
@@ -280,15 +237,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the MCQ Answer Generator prompt.
-
-        Args:
-            label: Optional label (production, latest, etc.).
-            version: Optional specific version.
-
-        Returns:
-            The MCQ Answer Generator prompt.
-        """
+        """Fetch the MCQ Answer Generator prompt."""
         return await self.get_prompt(
             self.MCQ_ANSWER_GENERATOR,
             label=label,

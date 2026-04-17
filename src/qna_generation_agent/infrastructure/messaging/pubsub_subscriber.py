@@ -1,14 +1,11 @@
-"""Pub/Sub subscriber adapter using async patterns with SubscriberClient.
-
-This module uses google-cloud-pubsub>=2.37's SubscriberClient with
-asyncio-compatible futures for non-blocking message consumption.
-"""
+"""Pub/Sub subscriber adapter using async patterns with SubscriberClient."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError as FutureCancelledError
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -65,43 +62,61 @@ class PubSubSubscriptionWorker:
         self._shutdown_lock = asyncio.Lock()
         self._shutting_down = False
 
+        # Runtime state tracking for health checks
+        self._started = False
+        self._running = False
+        self._failed = False
+        self._start_event = asyncio.Event()
+        self._stop_event = asyncio.Event()
+
     async def start(self) -> None:
-        """Start the subscriber using sync client with async threading wrapper.
-
-        The SubscriberClient uses gRPC streaming which runs in background threads.
-        We use asyncio.to_thread() to avoid blocking the event loop.
-        """
+        """Start the subscriber using sync client with async threading wrapper."""
+        self._started = True
+        self._failed = False
         self._loop = asyncio.get_running_loop()
-        self._subscriber = await asyncio.to_thread(SubscriberClient)
-        if self._subscriber is None:
-            raise RuntimeError("Failed to create SubscriberClient")
-        flow_control = FlowControl(max_messages=self._config.max_messages)
-        subscription_path = self._subscriber.subscription_path(
-            self._config.project_id,
-            self._config.subscription_id,
-        )
 
-        # Subscribe in thread to avoid blocking
-        self._future = await asyncio.to_thread(
-            self._subscriber.subscribe,
-            subscription_path,
-            callback=self._callback,
-            flow_control=flow_control,
-            await_callbacks_on_shutdown=True,
-        )
-        logger.info(
-            "subscription_started",
-            subscription_id=self._config.subscription_id,
-        )
+        try:
+            self._subscriber = await asyncio.to_thread(SubscriberClient)
+            if self._subscriber is None:
+                raise RuntimeError("Failed to create SubscriberClient")
+            flow_control = FlowControl(max_messages=self._config.max_messages)
+            subscription_path = self._subscriber.subscription_path(
+                self._config.project_id,
+                self._config.subscription_id,
+            )
+
+            # Subscribe in thread to avoid blocking
+            self._future = await asyncio.to_thread(
+                self._subscriber.subscribe,
+                subscription_path,
+                callback=self._callback,
+                flow_control=flow_control,
+                await_callbacks_on_shutdown=True,
+            )
+            self._running = True
+            self._start_event.set()
+            logger.info(
+                "subscription_started",
+                subscription_id=self._config.subscription_id,
+            )
+        except Exception as error:
+            self._failed = True
+            self._running = False
+            logger.error(
+                "subscription_start_failed",
+                subscription_id=self._config.subscription_id,
+                error=str(error),
+                error_type=type(error).__name__,
+            )
+            raise
 
     async def shutdown(self) -> None:
-        """Gracefully shutdown the subscriber.
-
-        Cancels the streaming pull future and closes the subscriber client.
-        Uses lock to ensure thread-safe state transition.
-        """
+        """Gracefully shutdown the subscriber."""
         async with self._shutdown_lock:
             self._shutting_down = True
+            self._running = False
+            self._stop_event.set()
+
         logger.info(
             "subscriber_shutdown_initiated",
             subscription_id=self._config.subscription_id,
@@ -138,10 +153,36 @@ class PubSubSubscriptionWorker:
         if self._subscriber is not None:
             await asyncio.to_thread(self._subscriber.close)
 
+        self._started = False
         logger.info(
             "subscription_stopped",
             subscription_id=self._config.subscription_id,
         )
+
+    @property
+    def is_started(self) -> bool:
+        """Return True if subscriber has been started."""
+        return self._started
+
+    @property
+    def is_running(self) -> bool:
+        """Return True if subscriber is actively consuming messages."""
+        return self._running and not self._shutting_down
+
+    @property
+    def is_failed(self) -> bool:
+        """Return True if subscriber failed to start or crashed."""
+        return self._failed
+
+    @property
+    def start_event(self) -> asyncio.Event:
+        """Event that is set when subscriber successfully starts."""
+        return self._start_event
+
+    @property
+    def stop_event(self) -> asyncio.Event:
+        """Event that is set when subscriber is shutting down."""
+        return self._stop_event
 
     def _callback(self, message: object) -> None:
         """Synchronous callback invoked by the subscriber thread.
@@ -200,11 +241,58 @@ class PubSubSubscriptionWorker:
                 message_id=getattr(message, "message_id", "unknown"),
             )
 
+    async def _extend_ack_deadline(
+        self, message: object, interval: int = 30
+    ) -> asyncio.Task[None]:
+        """Create a background task to extend ack deadline periodically.
+
+        Args:
+            message: The Pub/Sub message to extend deadline for.
+            interval: Seconds between deadline extensions (default 30).
+
+        Returns:
+            Task that extends deadline until cancelled.
+        """
+        extend_method = getattr(message, "modify_ack_deadline", None)
+        if not extend_method:
+            # Fallback: no deadline extension available - use Event that never fires
+            never_event = asyncio.Event()
+
+            async def noop() -> None:
+                await never_event.wait()
+
+            return asyncio.create_task(noop())
+
+        msg_id = getattr(message, "message_id", "unknown")
+
+        async def extend_loop() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    # Extend by 60 seconds each time
+                    await asyncio.to_thread(extend_method, 60)
+                    logger.debug(
+                        "ack_deadline_extended",
+                        message_id=msg_id,
+                        extension_seconds=60,
+                    )
+                except Exception:
+                    logger.warning(
+                        "ack_deadline_extension_failed",
+                        message_id=msg_id,
+                        exc_info=True,
+                    )
+
+        return asyncio.create_task(extend_loop())
+
     async def _handle_message(self, message: object) -> None:
         """Process a single message with proper ack/nack handling."""
         clear_context()
         msg_id = getattr(message, "message_id", "unknown")
         bind_context(message_id=msg_id)
+
+        # Start ack deadline extension for long-running LLM calls
+        extend_task = await self._extend_ack_deadline(message)
 
         try:
             data = getattr(message, "data", b"")
@@ -217,6 +305,11 @@ class PubSubSubscriptionWorker:
                 source_agent=envelope.source_agent,
             )
             receipt = await self._handler(envelope.to_domain_event())
+
+            # Cancel deadline extension before acking
+            extend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await extend_task
 
             # Ack the message on success
             ack_method = getattr(message, "ack", None)
@@ -234,6 +327,11 @@ class PubSubSubscriptionWorker:
             PermanentError,
             IdempotencyConflict,
         ) as error:
+            # Cancel deadline extension
+            extend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await extend_task
+
             # Ack permanent errors and duplicates (don't retry)
             ack_method = getattr(message, "ack", None)
             if ack_method:
@@ -244,12 +342,22 @@ class PubSubSubscriptionWorker:
                 error_type=error.__class__.__name__,
             )
         except asyncio.CancelledError:
+            # Cancel deadline extension
+            extend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await extend_task
+
             # Re-raise cancellation for proper shutdown handling
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)
             raise
         except (TransientError, StorageTransientError, LLMTransientError) as error:
+            # Cancel deadline extension
+            extend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await extend_task
+
             # Nack transient errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:
@@ -261,6 +369,11 @@ class PubSubSubscriptionWorker:
                 retry_after_seconds=getattr(error, "retry_after_seconds", None),
             )
         except Exception:
+            # Cancel deadline extension
+            extend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await extend_task
+
             # Nack unexpected errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:

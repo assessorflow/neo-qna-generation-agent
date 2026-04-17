@@ -11,6 +11,11 @@ from blacksheep.server.responses import json
 
 from qna_generation_agent.app.logging import bind_context, clear_context, get_logger
 from qna_generation_agent.app.settings import Settings
+from qna_generation_agent.application.errors import (
+    IdempotencyConflict,
+    TransientError,
+    ValidationError,
+)
 from qna_generation_agent.errors import AppError
 from qna_generation_agent.interfaces.http.schemas import ErrorResponse
 
@@ -97,6 +102,16 @@ def _resolve_request_id(request: Request) -> str:
     return raw_request_id.decode("utf-8")
 
 
+def _resolve_trace_id(request: Request) -> str | None:
+    """Extract trace ID from request headers if present."""
+    # Check common trace header formats
+    for header in [b"x-trace-id", b"trace-id", b"x-b3-traceid"]:
+        raw = request.get_first_header(header)
+        if raw is not None:
+            return raw.decode("utf-8", errors="replace")
+    return None
+
+
 def _get_request_id_from_context() -> str | None:
     """Get request_id from structlog context if available."""
     # Import locally to avoid circular imports at module level
@@ -110,10 +125,13 @@ async def correlation_middleware(request: Request, handler: Handler) -> Response
     """Bind request id / trace id context for the request lifecycle."""
     clear_context()
     request_id = _resolve_request_id(request)
-    bind_context(request_id=request_id, trace_id=None)
+    trace_id = _resolve_trace_id(request)
+    bind_context(request_id=request_id, trace_id=trace_id)
     try:
         response = await handler(request)
         response.add_header(b"x-request-id", request_id.encode("utf-8"))
+        if trace_id:
+            response.add_header(b"x-trace-id", trace_id.encode("utf-8"))
         return response
     finally:
         clear_context()
@@ -135,27 +153,59 @@ async def request_logging_middleware(request: Request, handler: Handler) -> Resp
     return response
 
 
+def _map_error_to_status(error: AppError) -> int:
+    """Map typed errors to appropriate HTTP status codes.
+
+    - ValidationError -> 400 Bad Request
+    - IdempotencyConflict -> 409 Conflict
+    - TransientError (and subclasses) -> 503 Service Unavailable
+    - All other AppError subclasses -> 500 Internal Server Error
+    """
+    if isinstance(error, ValidationError):
+        return 400
+    if isinstance(error, IdempotencyConflict):
+        return 409
+    if isinstance(error, TransientError):
+        return 503
+    return 500
+
+
 async def error_middleware(request: Request, handler: Handler) -> Response:
-    """Convert uncaught errors into structured JSON responses."""
+    """Convert uncaught errors into structured JSON responses.
+
+    Maps typed AppError subclasses to appropriate HTTP status codes:
+    - ValidationError -> 400 Bad Request
+    - IdempotencyConflict -> 409 Conflict
+    - TransientError (and subclasses like StorageTransientError, LLMTransientError) -> 503 Service Unavailable
+    - PermanentError and other AppError subclasses -> 500 Internal Server Error
+    """
     try:
         return await handler(request)
     except AppError as error:
-        # Use request_id from context if available (set by correlation_middleware),
-        # otherwise resolve from headers. This ensures consistent request_id even
-        # when the original request had no x-request-id header.
+        # Use request_id and trace_id from context if available (set by correlation_middleware),
+        # otherwise resolve from headers.
         request_id = _get_request_id_from_context() or _resolve_request_id(request)
+        status = _map_error_to_status(error)
         logger.error(
             "handled_http_error",
             method=request.method,
             path=request.path,
             error=str(error),
+            error_type=error.__class__.__name__,
+            status=status,
         )
-        return json(
+        response = json(
             ErrorResponse(
                 error=error.__class__.__name__, request_id=request_id
             ).model_dump(mode="json"),
-            status=500,
+            status=status,
         )
+        # Add Retry-After header for transient errors
+        if isinstance(error, TransientError) and error.retry_after_seconds:
+            response.add_header(
+                b"retry-after", str(error.retry_after_seconds).encode("utf-8")
+            )
+        return response
     except Exception as error:
         request_id = _get_request_id_from_context() or _resolve_request_id(request)
         logger.exception(

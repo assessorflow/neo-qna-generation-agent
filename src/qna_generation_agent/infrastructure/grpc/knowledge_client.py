@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import Any
 
 import grpc
 
 from qna_generation_agent.app.logging import get_logger
-from qna_generation_agent.application.errors import (
-    StoragePermanentError,
-    StorageTransientError,
+from qna_generation_agent.application.errors import StorageTransientError
+from qna_generation_agent.application.ports.knowledge_client import (
+    Chunk,
+    GetChunksByIdsCommand,
+    GetTopicsCommand,
+    KnowledgeClient,
+    SimilaritySearchCommand,
+    Topic,
 )
-from qna_generation_agent.infrastructure.grpc.channel import create_channel
+from qna_generation_agent.infrastructure.grpc.channel import (
+    create_channel,
+    get_grpc_metadata,
+    handle_grpc_error,
+)
 from qna_generation_agent.infrastructure.grpc.stubs.assessorflow.knowledge.v1.knowledge_pb2 import (  # type: ignore[attr-defined]
     GetChunksByIdsRequest,
     GetTopicsRequest,
@@ -25,56 +33,8 @@ from qna_generation_agent.infrastructure.grpc.stubs.assessorflow.knowledge.v1.kn
 
 logger = get_logger(__name__)
 
-# gRPC status codes that indicate transient (retryable) failures
-_RETRYABLE_CODES: frozenset[grpc.StatusCode] = frozenset(
-    {
-        grpc.StatusCode.UNAVAILABLE,
-        grpc.StatusCode.DEADLINE_EXCEEDED,
-        grpc.StatusCode.RESOURCE_EXHAUSTED,
-    }
-)
 
-
-@dataclass(frozen=True, slots=True)
-class Chunk:
-    """Knowledge chunk returned by Knowledge Service."""
-
-    chunk_id: str
-    workflow_id: str
-    content: str
-    source_type: str
-    metadata: dict[str, str]
-    score: float
-
-
-@dataclass(frozen=True, slots=True)
-class SimilaritySearchCommand:
-    """Command to search for similar chunks."""
-
-    query: str
-    workflow_id: str
-    kb_type: str  # "document", "enriched", "policy"
-    top_k: int = 5
-    assessment_id: str = ""  # Optional per proto3
-
-
-@dataclass(frozen=True, slots=True)
-class Topic:
-    """Topic returned by Knowledge Service."""
-
-    topic_id: str
-    name: str
-    subtopics: list[Topic]
-
-
-@dataclass(frozen=True, slots=True)
-class GetTopicsCommand:
-    """Command to get topics for a workflow."""
-
-    workflow_id: str
-
-
-class GrpcKnowledgeClient:
+class GrpcKnowledgeClient(KnowledgeClient):
     """gRPC implementation of Knowledge Service client."""
 
     def __init__(
@@ -117,24 +77,15 @@ class GrpcKnowledgeClient:
             assessment_id=command.assessment_id,
         )
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.SimilaritySearch(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Knowledge Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Knowledge Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Knowledge Service") from error
 
         return [
             Chunk(
@@ -150,7 +101,7 @@ class GrpcKnowledgeClient:
 
     async def get_chunks_by_ids(
         self,
-        chunk_ids: list[str],
+        command: GetChunksByIdsCommand,
     ) -> list[Chunk]:
         """Get chunks by their IDs from the Knowledge Service."""
         if self._stub is None:
@@ -158,26 +109,17 @@ class GrpcKnowledgeClient:
                 "Knowledge Service client is closed",
                 retry_after_seconds=5,
             )
-        request = GetChunksByIdsRequest(chunk_ids=chunk_ids)
+        request = GetChunksByIdsRequest(chunk_ids=command.chunk_ids)
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.GetChunksByIds(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Knowledge Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Knowledge Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Knowledge Service") from error
 
         return [
             Chunk(
@@ -203,24 +145,15 @@ class GrpcKnowledgeClient:
             )
         request = GetTopicsRequest(workflow_id=command.workflow_id)
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.GetTopics(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Knowledge Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Knowledge Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Knowledge Service") from error
 
         def _convert_topic(proto_topic: Any) -> Topic:
             """Recursively convert proto topic to dataclass."""
@@ -248,15 +181,19 @@ class GrpcKnowledgeClient:
 
         Attempts a lightweight GetChunksByIds call with empty chunk IDs.
         This is a non-destructive operation that verifies the service is responsive.
-        Treats auth/permission errors as unhealthy (misconfiguration).
+        Treats auth/permission errors and contract drift as unhealthy.
         """
         if self._channel is None or self._stub is None:
             return False
         try:
             async with asyncio.timeout(5.0):
                 request = GetChunksByIdsRequest(chunk_ids=[])
-                await self._stub.GetChunksByIds(request, timeout=5.0)
+                metadata = get_grpc_metadata()
+                await self._stub.GetChunksByIds(request, timeout=5.0, metadata=metadata)
             return True
+        except TimeoutError:
+            logger.warning("knowledge_health_check_timeout")
+            return False
         except grpc.aio.AioRpcError as error:
             # UNAVAILABLE means service is not reachable
             if error.code() == grpc.StatusCode.UNAVAILABLE:
@@ -268,6 +205,19 @@ class GrpcKnowledgeClient:
                 grpc.StatusCode.PERMISSION_DENIED,
             ):
                 logger.error("knowledge_service_auth_failed", error=str(error))
+                return False
+            # Contract drift / method errors indicate incompatibility - unhealthy
+            if error.code() in (
+                grpc.StatusCode.UNIMPLEMENTED,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                grpc.StatusCode.INTERNAL,
+                grpc.StatusCode.UNKNOWN,
+            ):
+                logger.error(
+                    "knowledge_service_contract_drift",
+                    error=str(error),
+                    code=str(error.code()),
+                )
                 return False
             # Any other error means the service is reachable but rejected the request
             return True

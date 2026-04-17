@@ -79,8 +79,8 @@ class QuestionSet:
             raise ValidationError("QuestionSet id cannot be empty")
         if not self.assessment_id.strip():
             raise ValidationError("QuestionSet assessment_id cannot be empty")
-        if self.iteration < 0:
-            raise ValidationError("QuestionSet iteration must be non-negative")
+        if self.iteration < 1:
+            raise ValidationError("QuestionSet iteration must be >= 1")
 
     def _transition_to(
         self,
@@ -120,6 +120,25 @@ class QuestionSet:
         )
 
     def add_question(self, question: Question) -> None:
+        """Add a question to the set with state and duplicate guards.
+
+        Raises:
+            InvalidStateTransitionError: If QuestionSet is in a terminal state.
+            ValidationError: If question with same ID already exists.
+        """
+        if self.status in {GenerationStatus.COMPLETED, GenerationStatus.FAILED}:
+            raise InvalidStateTransitionError(
+                "Cannot add questions to terminal state",
+                from_state=self.status.value,
+                to_state="modified",
+                entity_id=self.id,
+            )
+        if any(q.id == question.id for q in self.questions):
+            raise ValidationError(
+                f"Question with id {question.id} already exists in set",
+                question_id=question.id.value,
+                question_set_id=self.id,
+            )
         self.questions.append(question)
 
 
@@ -149,3 +168,7 @@ class GenerationRequest:
             raise ValidationError("GenerationRequest id cannot be empty")
         if not self.assessment_id.strip():
             raise ValidationError("GenerationRequest assessment_id cannot be empty")
+        if not self.correlation_id.strip():
+            raise ValidationError("GenerationRequest correlation_id cannot be empty")
+        if not self.workflow_id.strip():
+            raise ValidationError("GenerationRequest workflow_id cannot be empty")

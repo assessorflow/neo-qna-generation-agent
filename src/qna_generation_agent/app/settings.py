@@ -54,12 +54,15 @@ class Settings(BaseSettings):
     )
     # Workers are strictly limited to 1 for both HTTP (Granian) and Pub/Sub
     # to ensure single-threaded operation and prevent concurrency issues.
-    workers: int = Field(default=1, ge=1, le=1)
+    # Validation happens in _enforce_single_worker model_validator.
+    workers: int = Field(default=1)
     log_level: LogLevel = Field(
         default=LogLevel.INFO,
         validation_alias=AliasChoices("LOG_LEVEL", "QNA_LOG_LEVEL"),
     )
 
+    # Unified serve mode: HTTP is always enabled (required for health checks).
+    # Pub/Sub is optional and can be disabled for local development without GCP.
     pubsub_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("PUBSUB_ENABLED", "QNA_PUBSUB_ENABLED"),
@@ -101,7 +104,8 @@ class Settings(BaseSettings):
     )
     # Pub/Sub flow control: strictly limited to 1 concurrent message
     # to ensure single-threaded processing aligned with HTTP worker count.
-    pubsub_max_workers: int = Field(default=1, ge=1, le=1)
+    # Validation happens in _enforce_single_worker model_validator.
+    pubsub_max_workers: int = Field(default=1)
 
     langfuse_public_key: str | None = Field(
         default=None,
@@ -125,14 +129,12 @@ class Settings(BaseSettings):
         ),
     )
 
-    http_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("HTTP_ENABLED", "QNA_HTTP_ENABLED"),
-    )
-
     model_id: str = Field(validation_alias="OPENAI_MODEL")
     llm_api_key: str = Field(validation_alias="OPENAI_API_KEY")
     llm_base_url: str = Field(validation_alias="OPENAI_BASE_URL")
+    # Deprecated: WorkflowLLMProvider was removed due to production-safety issues
+    # (timing-dependent parsing, broken ID aggregation, brittle exception handling).
+    # This setting is kept for backwards compatibility but has no effect.
     llm_workflow_mode: bool = Field(
         default=False,
         validation_alias=AliasChoices("LLM_WORKFLOW_MODE", "QNA_LLM_WORKFLOW_MODE"),
@@ -212,12 +214,28 @@ class Settings(BaseSettings):
             "GRPC_TLS_CERT_PATH",
         ),
     )
+    grpc_timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        validation_alias=AliasChoices(
+            "GRPC_TIMEOUT_SECONDS",
+            "QNA_GRPC_TIMEOUT_SECONDS",
+        ),
+    )
 
     enable_test_routes: bool = Field(
         default=False,
         validation_alias=AliasChoices(
             "ENABLE_TEST_ROUTES",
             "QNA_ENABLE_TEST_ROUTES",
+        ),
+    )
+    prompt_label: str = Field(
+        default="production",
+        validation_alias=AliasChoices(
+            "PROMPT_LABEL",
+            "QNA_PROMPT_LABEL",
         ),
     )
 
@@ -243,13 +261,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_single_worker(self) -> Settings:
-        """Enforce single-worker constraint after validation.
+        """Validate single-worker constraint.
 
         Both HTTP (Granian) and Pub/Sub are strictly limited to 1 worker
         to ensure single-threaded operation and prevent concurrency issues.
+        Raises ConfigurationError if unsupported values are provided.
         """
-        object.__setattr__(self, "workers", 1)
-        object.__setattr__(self, "pubsub_max_workers", 1)
+        if self.workers != 1:
+            raise ConfigurationError(
+                "workers must be 1 (single-worker architecture enforced)",
+                workers=self.workers,
+            )
+        if self.pubsub_max_workers != 1:
+            raise ConfigurationError(
+                "pubsub_max_workers must be 1 (single-worker architecture enforced)",
+                pubsub_max_workers=self.pubsub_max_workers,
+            )
         return self
 
     @property

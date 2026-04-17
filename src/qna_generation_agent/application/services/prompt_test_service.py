@@ -50,15 +50,7 @@ class PromptTestService:
         timeout_seconds: int,
         prompt_provider: PromptProvider,
     ) -> None:
-        """Initialize the prompt test service.
-
-        Args:
-            model_id: The OpenAI model ID to use.
-            api_key: OpenAI API key.
-            base_url: Optional base URL for OpenAI API.
-            timeout_seconds: Timeout for LLM calls.
-            prompt_provider: Langfuse prompt provider for fetching prompts.
-        """
+        """Initialize the prompt test service."""
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
         self._prompt_provider = prompt_provider
@@ -85,24 +77,13 @@ class PromptTestService:
         topics: str,
         chunks: list[str],
     ) -> PromptTestResult:
-        """Test the Assessment Generator prompt with structured output.
-
-        Args:
-            structured_count: Number of MCQ questions to generate.
-            non_structured_count: Number of open-ended questions to generate.
-            difficulty: Target difficulty (easy, medium, hard).
-            topics: Comma-separated list of topics.
-            chunks: List of document chunks.
-
-        Returns:
-            PromptTestResult with parsed AssessmentGeneratorOutputSchema.
-        """
+        """Test the Assessment Generator prompt with structured output."""
         start_time = time.monotonic()
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
                 "Assessment Generator",
-                label="latest",
+                label=self._prompt_provider.default_label,
             )
 
             chunks_formatted = "\n\n".join(
@@ -120,7 +101,6 @@ class PromptTestService:
             prompt_str = str(compiled)
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
-            # Execute via Strands Agent with structured output
             agent = Agent(
                 model=self._model,
                 system_prompt="You are an expert assessment generator for ELP (English Language Proficiency) assessments targeting foreign students in Singapore.",
@@ -133,7 +113,6 @@ class PromptTestService:
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
-            # Convert Pydantic model to dict for serialization
             result_dict = (
                 result.structured_output.model_dump(mode="json")
                 if result and result.structured_output
@@ -144,7 +123,7 @@ class PromptTestService:
                 result=result_dict,
                 prompt_version=prompt_version,
                 execution_time_ms=execution_time_ms,
-                raw_output=None,  # Structured output doesn't have raw text
+                raw_output=None,
             )
 
         except Exception as error:
@@ -169,26 +148,15 @@ class PromptTestService:
         difficulty: str,
         l1_background: str,
     ) -> PromptTestResult:
-        """Test the MCQ Answer Generator prompt with structured output.
-
-        Args:
-            question_stem: The MCQ question text/stem.
-            grammar_target: The grammar point being tested.
-            difficulty: Target difficulty (easy, medium, hard).
-            l1_background: Supporting knowledge chunk with L1 context.
-
-        Returns:
-            PromptTestResult with parsed MCQAnswerGeneratorOutputSchema.
-        """
+        """Test the MCQ Answer Generator prompt with structured output."""
         start_time = time.monotonic()
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
                 "MCQ Answer Generator",
-                label="latest",
+                label=self._prompt_provider.default_label,
             )
 
-            # Map our variables to Langfuse prompt variables
             compiled = prompt_obj.compile(
                 question_text=question_stem,
                 topic=grammar_target,
@@ -199,7 +167,6 @@ class PromptTestService:
             prompt_str = str(compiled)
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
-            # Execute via Strands Agent with structured output
             agent = Agent(
                 model=self._model,
                 system_prompt="You are an expert at creating MCQ answer options with L1-targeted distractors for English Language Proficiency assessments.",
@@ -212,7 +179,6 @@ class PromptTestService:
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
-            # Convert Pydantic model to dict for serialization
             result_dict = (
                 result.structured_output.model_dump(mode="json")
                 if result and result.structured_output
@@ -248,26 +214,15 @@ class PromptTestService:
         correct_answer: str,
         target_audience: str,
     ) -> PromptTestResult:
-        """Test the MCQ Explanation Generator prompt with structured output.
-
-        Args:
-            question: The MCQ question stem.
-            options: Dict mapping A/B/C/D to option text.
-            correct_answer: The correct answer letter (A/B/C/D).
-            target_audience: Description of target learners (used as topic and chunk_content).
-
-        Returns:
-            PromptTestResult with parsed MCQExplanationOutputSchema.
-        """
+        """Test the MCQ Explanation Generator prompt with structured output."""
         start_time = time.monotonic()
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
                 "MCQ Explanation Generator",
-                label="latest",
+                label=self._prompt_provider.default_label,
             )
 
-            # Map to Langfuse prompt variables
             compiled = prompt_obj.compile(
                 question_text=question,
                 topic=target_audience,
@@ -282,7 +237,6 @@ class PromptTestService:
             prompt_str = str(compiled)
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
-            # Execute via Strands Agent with structured output
             agent = Agent(
                 model=self._model,
                 system_prompt="You are an expert at generating detailed explanations for MCQ distractors, with expertise in L1 interference patterns for English language learners.",
@@ -295,7 +249,6 @@ class PromptTestService:
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
-            # Convert Pydantic model to dict for serialization
             result_dict = (
                 result.structured_output.model_dump(mode="json")
                 if result and result.structured_output
@@ -326,7 +279,6 @@ class PromptTestService:
     async def health_check(self) -> bool:
         """Check if the prompt test service is functional."""
         try:
-            # Test by checking if we can fetch a prompt
             await self._prompt_provider.get_prompt("Assessment Generator")
             return True
         except Exception:

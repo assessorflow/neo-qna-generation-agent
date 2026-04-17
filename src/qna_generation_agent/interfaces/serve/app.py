@@ -1,4 +1,8 @@
-"""Granian target module for the unified serve runtime."""
+"""Granian target module for the unified serve runtime.
+
+This module is intentionally import-light. Initialization happens via
+BlackSheep's on_start/on_stop handlers which are registered in the factory.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ settings = load_settings()
 configure_logging(settings.log_level.value)
 container = bootstrap_serve(settings)
 
+# Create the ASGI app - startup/shutdown is handled by on_start/on_stop handlers
 app = create_blacksheep_app(container)
 
 __all__ = ["app"]

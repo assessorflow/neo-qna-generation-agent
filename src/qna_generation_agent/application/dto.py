@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from qna_generation_agent.domain.enums import QuestionType
+from qna_generation_agent.domain.enums import (
+    DifficultyLevel,
+    GenerationStatus,
+    Purpose,
+    QuestionType,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +30,7 @@ class QuestionDraft:
     question_text: str
     answer_text: str
     question_type: QuestionType
-    difficulty_level: str | None
+    difficulty_level: DifficultyLevel | None
     explanation: str | None = None
     references: list[str] = field(default_factory=list)
     topic_id: str | None = None
@@ -53,14 +58,15 @@ class GenerationCommand:
     request_id: str
     workflow_id: str
     correlation_id: str
+    trace_id: str | None  # For distributed tracing propagation
     assessment_id: str
     question_set_id: str  # Required for all flows
     validation_result: str | None
     iteration: int | None  # Nullable for initial generation
     structured_count: int | None  # Nullable for regeneration
     non_structured_count: int | None  # Nullable for regeneration
-    difficulty_level: str | None  # Nullable for regeneration
-    purpose: str | None  # Nullable for regeneration
+    difficulty_level: DifficultyLevel | None  # Nullable for regeneration
+    purpose: Purpose | None  # Nullable for regeneration
     feedback_issues: list[str]  # For regeneration feedback
 
 
@@ -80,7 +86,7 @@ class GenerationReceipt:
     non_structured_generated: int
     iteration: int
     question_count: int
-    status: str
+    status: GenerationStatus
     trace_id: str | None = None
     trace_url: str | None = None
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

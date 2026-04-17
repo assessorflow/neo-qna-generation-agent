@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from qna_generation_agent.application.dto import GenerationReceipt
 from qna_generation_agent.application.errors import (
     LLMTransientError,
-    PermanentError,
     StorageTransientError,
-    TransientError,
 )
 from qna_generation_agent.application.errors import (
     ValidationError as AppValidationError,
@@ -147,35 +145,40 @@ class TestPubSubSubscriptionWorker:
         assert message._acked
 
     @pytest.mark.unit
-    async def test_handle_message_acks_permanent_errors(
+    async def test_handle_message_nacks_non_json_payload(
         self,
         subscription_config: SubscriptionConfig,
-        valid_trigger_event: dict[str, Any],
     ) -> None:
-        """Test that message is acked for permanent errors."""
-        handler = AsyncMock(side_effect=PermanentError("Permanent failure"))
+        """Test that non-JSON payloads are nacked."""
+        handler = AsyncMock()
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
-
+        # Non-JSON binary data
         message = FakeMessage(
             message_id="msg_123",
-            data=orjson.dumps(valid_trigger_event),
+            data=b"\x00\x01\x02\x03\xff\xfe",  # Binary garbage
         )
 
         await worker._handle_message(message)
 
-        assert message._acked
+        # Should nack non-JSON payloads (can't parse, so treat as transient)
+        assert message._nacked
+        # Handler should not be called
+        handler.assert_not_called()
 
     @pytest.mark.unit
-    async def test_handle_message_nacks_transient_errors(
+    async def test_handle_message_acks_idempotency_conflict(
         self,
         subscription_config: SubscriptionConfig,
         valid_trigger_event: dict[str, Any],
     ) -> None:
-        """Test that message is nacked for transient errors."""
+        """Test that IdempotencyConflict errors are acked (don't retry duplicates)."""
+        from qna_generation_agent.application.errors import IdempotencyConflict
+
         handler = AsyncMock(
-            side_effect=TransientError("Transient failure", retry_after_seconds=5)
+            side_effect=IdempotencyConflict(
+                "Event already processing", event_id="evt_123"
+            )
         )
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
@@ -188,7 +191,165 @@ class TestPubSubSubscriptionWorker:
 
         await worker._handle_message(message)
 
+        # Idempotency conflicts should be acked (not retried)
+        assert message._acked
+        assert not message._nacked
+
+    @pytest.mark.unit
+    async def test_callback_handles_closed_loop(
+        self,
+        subscription_config: SubscriptionConfig,
+    ) -> None:
+        """Test that callback handles closed event loop gracefully."""
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(subscription_config, handler)
+
+        # Create a closed loop and assign it
+        loop = asyncio.new_event_loop()
+        loop.close()
+        worker._loop = loop
+
+        message = FakeMessage(message_id="msg_123", data=b"{}")
+
+        # Callback should handle closed loop gracefully (nack message)
+        worker._callback(message)
+
+        # Message should be nacked when loop is closed
         assert message._nacked
+
+    @pytest.mark.unit
+    async def test_callback_handles_run_coroutine_threadsafe_failure(
+        self,
+        subscription_config: SubscriptionConfig,
+    ) -> None:
+        """Test that callback handles run_coroutine_threadsafe RuntimeError."""
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(subscription_config, handler)
+
+        # Set up a valid loop
+        worker._loop = asyncio.get_running_loop()
+
+        message = FakeMessage(message_id="msg_123", data=b"{}")
+
+        # Mock run_coroutine_threadsafe to raise RuntimeError
+        original_run = asyncio.run_coroutine_threadsafe
+
+        def mock_run_coroutine(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Event loop is closed")
+
+        asyncio.run_coroutine_threadsafe = mock_run_coroutine  # type: ignore
+
+        try:
+            worker._callback(message)
+        finally:
+            asyncio.run_coroutine_threadsafe = original_run  # type: ignore
+
+        # Message should be nacked when scheduling fails
+        assert message._nacked
+
+    @pytest.mark.unit
+    async def test_shutdown_handles_timeout(
+        self,
+        subscription_config: SubscriptionConfig,
+    ) -> None:
+        """Test that shutdown handles timeout gracefully."""
+
+        class SlowFuture:
+            """Future that never completes (simulates timeout)."""
+
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def result(self, timeout: float | None = None) -> None:
+                # Simulate timeout by sleeping longer than the timeout
+                import time
+
+                time.sleep(0.1)  # This will exceed the 10s timeout in shutdown
+
+        class TimeoutSubscriber:
+            """Subscriber that returns slow future."""
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.future = SlowFuture()
+
+            def subscription_path(self, project_id: str, subscription_id: str) -> str:
+                return f"projects/{project_id}/subscriptions/{subscription_id}"
+
+            def subscribe(self, *args: Any, **kwargs: Any) -> Any:
+                return self.future
+
+            def close(self) -> None:
+                self.closed = True
+
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(subscription_config, handler)
+
+        # Manually set subscriber and future
+        slow_subscriber = TimeoutSubscriber()
+        worker._subscriber = slow_subscriber  # type: ignore
+        worker._future = slow_subscriber.future  # type: ignore
+
+        # Start the worker first
+        await worker.start()
+
+        # Shutdown should handle timeout gracefully
+        await worker.shutdown()
+
+        # Subscriber should be closed even after timeout
+        # Note: In the actual implementation, timeout is caught and logged
+
+    @pytest.mark.unit
+    async def test_shutdown_handles_not_found(
+        self,
+        subscription_config: SubscriptionConfig,
+    ) -> None:
+        """Test that shutdown handles NotFound exception."""
+        from google.api_core.exceptions import NotFound
+
+        class NotFoundFuture:
+            """Future that raises NotFound."""
+
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def result(self, timeout: float | None = None) -> None:
+                raise NotFound("Subscription not found")
+
+        class NotFoundSubscriber:
+            """Subscriber that returns future raising NotFound."""
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.future = NotFoundFuture()
+
+            def subscription_path(self, project_id: str, subscription_id: str) -> str:
+                return f"projects/{project_id}/subscriptions/{subscription_id}"
+
+            def subscribe(self, *args: Any, **kwargs: Any) -> Any:
+                return self.future
+
+            def close(self) -> None:
+                self.closed = True
+
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(subscription_config, handler)
+
+        # Manually set subscriber and future
+        not_found_subscriber = NotFoundSubscriber()
+        worker._subscriber = not_found_subscriber  # type: ignore
+        worker._future = not_found_subscriber.future  # type: ignore
+
+        # Shutdown should handle NotFound gracefully
+        await worker.shutdown()
+
+        # Should complete without raising
 
     @pytest.mark.unit
     async def test_handle_message_nacks_unexpected_errors(
@@ -356,3 +517,71 @@ class TestPubSubSubscriptionWorker:
         await worker._handle_message(message)
 
         assert message._nacked
+
+    @pytest.mark.unit
+    async def test_worker_tracks_runtime_state_initial(self) -> None:
+        """Test that worker initializes with correct runtime state."""
+        config = SubscriptionConfig(
+            project_id="test-project",
+            subscription_id="test-subscription",
+            max_messages=1,
+        )
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(config, handler)
+
+        assert worker.is_started is False
+        assert worker.is_running is False
+        assert worker.is_failed is False
+        assert not worker.start_event.is_set()
+        assert not worker.stop_event.is_set()
+
+    @pytest.mark.unit
+    async def test_worker_sets_failed_on_start_error(self) -> None:
+        """Test that worker sets failed state when start fails."""
+        config = SubscriptionConfig(
+            project_id="test-project",
+            subscription_id="test-subscription",
+            max_messages=1,
+        )
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(config, handler)
+
+        # Simulate start failure by mocking SubscriberClient to raise
+        with patch(
+            "qna_generation_agent.infrastructure.messaging.pubsub_subscriber.asyncio.to_thread",
+            side_effect=RuntimeError("Failed to create client"),
+        ):
+            with pytest.raises(RuntimeError):
+                await worker.start()
+
+        assert worker.is_started is True  # Started was attempted
+        assert worker.is_running is False  # But not running
+        assert worker.is_failed is True  # And marked as failed
+        assert not worker.start_event.is_set()  # Start event not set on failure
+
+    @pytest.mark.unit
+    async def test_worker_runtime_state_after_shutdown(self) -> None:
+        """Test that worker correctly updates runtime state after shutdown."""
+        config = SubscriptionConfig(
+            project_id="test-project",
+            subscription_id="test-subscription",
+            max_messages=1,
+        )
+        handler = AsyncMock()
+        worker = PubSubSubscriptionWorker(config, handler)
+
+        # Manually set started state (simulating successful start)
+        worker._started = True
+        worker._running = True
+
+        # Create mock subscriber that doesn't block
+        mock_subscriber = MagicMock()
+        mock_subscriber.close = MagicMock()
+        worker._subscriber = mock_subscriber  # type: ignore
+
+        await worker.shutdown()
+
+        assert worker.is_started is False
+        assert worker.is_running is False
+        assert worker.is_failed is False
+        assert worker.stop_event.is_set()

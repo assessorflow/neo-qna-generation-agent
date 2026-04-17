@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -214,4 +215,240 @@ async def test_generate_with_prompt_handles_timeout(
             difficulty_level=DifficultyLevel.MEDIUM,
             correlation_id="corr_123",
             question_type="structured",
+        )
+
+
+@pytest.mark.unit
+async def test_shutdown_closes_health_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that shutdown closes the AsyncOpenAI health client."""
+    provider = _provider(monkeypatch)
+
+    # Create a mock health client
+    mock_client = MagicMock()
+    mock_client.close = AsyncMock()
+    provider._health_client = mock_client
+
+    await provider.shutdown()
+
+    mock_client.close.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_shutdown_handles_errors_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that shutdown handles client close errors gracefully."""
+    provider = _provider(monkeypatch)
+
+    # Create a mock health client that raises on close
+    mock_client = MagicMock()
+    mock_client.close = AsyncMock(side_effect=RuntimeError("Close failed"))
+    provider._health_client = mock_client
+
+    # Should not raise
+    await provider.shutdown()
+
+
+@pytest.mark.unit
+async def test_health_check_returns_true_when_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that health_check returns True when models.list succeeds."""
+    provider = _provider(monkeypatch)
+
+    # Create a mock health client
+    mock_client = MagicMock()
+    mock_models = MagicMock()
+    mock_models.list = AsyncMock(return_value=[])
+    mock_client.models = mock_models
+    provider._health_client = mock_client
+
+    result = await provider.health_check()
+
+    assert result is True
+    mock_models.list.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_health_check_returns_false_on_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that health_check returns False on authentication error."""
+    from openai import AuthenticationError
+
+    provider = _provider(monkeypatch)
+
+    # Create a mock health client that raises AuthenticationError
+    mock_client = MagicMock()
+    mock_models = MagicMock()
+    # AuthenticationError requires response and body kwargs
+    auth_error = AuthenticationError(
+        "Invalid API key",
+        response=MagicMock(),
+        body={"error": {"message": "Invalid API key"}},
+    )
+    mock_models.list = AsyncMock(side_effect=auth_error)
+    mock_client.models = mock_models
+    provider._health_client = mock_client
+
+    result = await provider.health_check()
+
+    assert result is False
+
+
+@pytest.mark.unit
+async def test_generate_maps_rate_limit_to_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that rate limit errors are mapped to LLMTransientError."""
+    FakeAgent.responses = [RuntimeError("Rate limit exceeded, retry after 30s")]
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(LLMTransientError) as exc_info:
+        await provider.generate_structured(
+            context=_context(),
+            count=1,
+            difficulty_level=DifficultyLevel.MEDIUM,
+            correlation_id="corr_123",
+        )
+
+    assert exc_info.value.retry_after_seconds == 30
+
+
+@pytest.mark.unit
+async def test_generate_maps_generic_error_to_permanent_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that generic errors are mapped to LLMPermanentError."""
+    FakeAgent.responses = [RuntimeError("Some other error")]
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(LLMPermanentError):
+        await provider.generate_structured(
+            context=_context(),
+            count=1,
+            difficulty_level=DifficultyLevel.MEDIUM,
+            correlation_id="corr_123",
+        )
+
+
+# ============================================================================
+# invoke_with_schema Tests
+# ============================================================================
+
+
+@pytest.mark.unit
+async def test_invoke_with_schema_returns_valid_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that invoke_with_schema returns valid structured output."""
+    from pydantic import BaseModel
+
+    class TestOutputSchema(BaseModel):
+        name: str
+        count: int
+
+    FakeAgent.responses = [
+        SimpleNamespace(structured_output=TestOutputSchema(name="Test", count=42))
+    ]
+    provider = _provider(monkeypatch)
+
+    result = await provider.invoke_with_schema(
+        prompt="Generate test output",
+        structured_output_model=TestOutputSchema,
+    )
+
+    assert result is not None
+    assert result.name == "Test"
+    assert result.count == 42
+
+
+@pytest.mark.unit
+async def test_invoke_with_schema_returns_none_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that invoke_with_schema returns None on timeout."""
+    from pydantic import BaseModel
+
+    class TestOutputSchema(BaseModel):
+        name: str
+
+    FakeAgent.responses = [("sleep", 0.05)]  # Simulated timeout
+    provider = _provider(monkeypatch)
+    provider._timeout_seconds = 0  # Force immediate timeout
+
+    result = await provider.invoke_with_schema(
+        prompt="Generate test output",
+        structured_output_model=TestOutputSchema,
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_invoke_with_schema_returns_none_on_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that invoke_with_schema returns None on auth error."""
+    from openai import AuthenticationError
+    from pydantic import BaseModel
+
+    class TestOutputSchema(BaseModel):
+        name: str
+
+    FakeAgent.responses = [
+        AuthenticationError(
+            "Invalid API key",
+            response=MagicMock(),
+            body={"error": {"message": "Invalid API key"}},
+        )
+    ]
+    provider = _provider(monkeypatch)
+
+    result = await provider.invoke_with_schema(
+        prompt="Generate test output",
+        structured_output_model=TestOutputSchema,
+    )
+
+    assert result is None
+
+
+# ============================================================================
+# Invalid Structured Output Tests
+# ============================================================================
+
+
+@pytest.mark.unit
+async def test_generate_raises_on_none_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that generate raises error when structured output is None."""
+    FakeAgent.responses = [SimpleNamespace(structured_output=None)]
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(LLMPermanentError, match="Structured output was not returned"):
+        await provider.generate_structured(
+            context=_context(),
+            count=1,
+            difficulty_level=DifficultyLevel.MEDIUM,
+            correlation_id="corr_123",
+        )
+
+
+@pytest.mark.unit
+async def test_generate_raises_on_invalid_output_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that generate raises error when output type is wrong."""
+    FakeAgent.responses = [SimpleNamespace(structured_output={"invalid": "data"})]
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(LLMPermanentError, match="Structured output was not returned"):
+        await provider.generate_structured(
+            context=_context(),
+            count=1,
+            difficulty_level=DifficultyLevel.MEDIUM,
+            correlation_id="corr_123",
         )

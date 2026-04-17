@@ -17,20 +17,16 @@ dependencies = [
     "langfuse>=4.2",
     "orjson>=3.11",
     "strands-agents[openai]>=1.35",
-    "strands-agents-tools>=0.4",
     "structlog>=25.5",
     "pydantic>=2.13",
     "pydantic-settings>=2.13",
     "openai>=2.31",
-    "grpcio-tools>=1.80.0",
 ]
-
-[project.scripts]
-qna-serve = "qna_generation_agent.interfaces.serve.__main__:main"
 
 [project.optional-dependencies]
 dev = [
     "pre-commit>=4.5",
+    "grpcio-tools>=1.80.0",
 ]
 test = [
     "pytest>=9.0",
@@ -44,6 +40,9 @@ lint = [
 audit = [
     "pip-audit>=2.10",
 ]
+
+[project.scripts]
+qna-serve = "qna_generation_agent.interfaces.serve.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qna_generation_agent"]
@@ -74,7 +73,6 @@ module = [
     "langfuse.*",
     "openapidocs.*",
     "strands.*",
-    "strands_tools.*",
     "qna_generation_agent.infrastructure.grpc.stubs.*",
 ]
 ignore_missing_imports = true
@@ -95,8 +93,6 @@ branch = true
 omit = [
     "*/__init__.py",
     "src/qna_generation_agent/infrastructure/grpc/stubs/**/*",
-    "src/qna_generation_agent/interfaces/serve/__main__.py",
-    "src/qna_generation_agent/interfaces/serve/app.py",
 ]
 
 [tool.coverage.report]

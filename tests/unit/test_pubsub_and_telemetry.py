@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -316,9 +317,11 @@ async def test_pubsub_completion_publisher_skips_audit_topics_when_not_configure
     await publisher.close()
 
 
-async def test_pubsub_subscription_worker_processes_and_rejects_messages(
+async def test_pubsub_subscription_worker_processes_valid_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Test that valid messages are processed and acked."""
+
     async def immediate_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
         return func(*args, **kwargs)
 
@@ -332,8 +335,11 @@ async def test_pubsub_subscription_worker_processes_and_rejects_messages(
         immediate_to_thread,
     )
 
+    handler_called = False
+
     async def handler(event: Any) -> GenerationReceipt:
-        del event
+        nonlocal handler_called
+        handler_called = True
         return GenerationReceipt(
             question_set_id="qs_123",
             assessment_id="assessment_123",
@@ -358,33 +364,89 @@ async def test_pubsub_subscription_worker_processes_and_rejects_messages(
         dumps(
             {
                 "event_id": "evt_123",
-                "event_type": "assessorflow.workflow.qna-generation.trigger",
+                "event_type": "assessorflow.qa-generation.trigger",
                 "workflow_id": "wf_123",
-                "timestamp": "2026-04-15T00:00:00+00:00",
+                "timestamp": datetime.now(UTC).isoformat(),
                 "source_agent": "workflow-agent",
                 "correlation_id": "corr_123",
+                "trace_id": "trace_123",
                 "payload": {
                     "assessment_id": "assessment_123",
+                    "question_set_id": "qs_123",
                     "validation_result": None,
                     "iteration": 1,
-                    "structured_generated": 1,
-                    "non_structured_generated": 0,
-                    "difficulty": DifficultyLevel.MEDIUM.value,
+                    "structured_count": 1,
+                    "non_structured_count": 0,
+                    "difficulty_level": DifficultyLevel.MEDIUM.value,
                     "purpose": Purpose.ASSESSMENT.value,
                 },
             }
         )
     )
-    invalid_message = FakeMessage(b'{"invalid":true}')
 
     await worker._handle_message(valid_message)
+    await worker.shutdown()
+
+    # Verify handler was called and message was acked
+    assert handler_called is True
+    assert valid_message.acked is True
+    assert subscriber.future.cancelled is True
+    assert subscriber.closed is True
+
+
+async def test_pubsub_subscription_worker_rejects_malformed_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that malformed envelopes are rejected (acked without processing)."""
+
+    async def immediate_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    subscriber = FakeSubscriberClient()
+    monkeypatch.setattr(
+        "qna_generation_agent.infrastructure.messaging.pubsub_subscriber.SubscriberClient",
+        lambda: subscriber,
+    )
+    monkeypatch.setattr(
+        "qna_generation_agent.infrastructure.messaging.pubsub_subscriber.asyncio.to_thread",
+        immediate_to_thread,
+    )
+
+    handler_called = False
+
+    async def handler(event: Any) -> GenerationReceipt:
+        nonlocal handler_called
+        handler_called = True
+        return GenerationReceipt(
+            question_set_id="qs_123",
+            assessment_id="assessment_123",
+            structured_generated=1,
+            non_structured_generated=0,
+            iteration=1,
+            question_count=1,
+            status="completed",
+        )
+
+    worker = PubSubSubscriptionWorker(
+        SubscriptionConfig(
+            project_id="project-id",
+            subscription_id="subscription-id",
+            max_messages=5,
+        ),
+        handler,
+    )
+    await worker.start()
+
+    # Malformed message - missing required fields
+    invalid_message = FakeMessage(b'{"invalid":true}')
+
     await worker._handle_message(invalid_message)
     await worker.shutdown()
 
-    assert valid_message.acked is True
+    # Handler should NOT be called for malformed messages
+    assert handler_called is False
+    # But message should be acked (to prevent retry of bad messages)
     assert invalid_message.acked is True
-    assert subscriber.future.cancelled is True
-    assert subscriber.closed is True
 
 
 async def test_langfuse_telemetry_wraps_client_and_context(
@@ -519,7 +581,7 @@ async def test_pubsub_subscription_worker_handles_transient_error(
                 "event_id": "evt_123",
                 "event_type": "assessorflow.qa-generation.trigger",
                 "workflow_id": "wf_123",
-                "timestamp": "2026-04-15T00:00:00+00:00",
+                "timestamp": datetime.now(UTC).isoformat(),
                 "source_agent": "workflow-agent",
                 "correlation_id": "corr_123",
                 "payload": {
@@ -527,9 +589,9 @@ async def test_pubsub_subscription_worker_handles_transient_error(
                     "question_set_id": "qs_123",
                     "validation_result": None,
                     "iteration": 1,
-                    "structured_generated": 1,
-                    "non_structured_generated": 0,
-                    "difficulty": DifficultyLevel.MEDIUM.value,
+                    "structured_count": 1,
+                    "non_structured_count": 0,
+                    "difficulty_level": DifficultyLevel.MEDIUM.value,
                     "purpose": Purpose.ASSESSMENT.value,
                 },
             }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 from qna_generation_agent.application.dto import GenerationReceipt
@@ -15,27 +16,51 @@ from qna_generation_agent.domain.entities import QuestionSet
 
 
 class InMemoryIdempotencyStore(IdempotencyStore):
-    """In-memory idempotency adapter."""
+    """In-memory idempotency adapter.
+
+    **NOTE: This adapter is for testing and local development only.**
+    It does not implement TTL expiration - records persist for the lifetime
+    of the process. For production use, a persistent store with TTL support
+    (e.g., Redis, Cloud Memorystore) is required.
+
+    The ttl_seconds parameter is accepted for interface compatibility but
+    is ignored by this implementation.
+    """
 
     def __init__(self) -> None:
         self._records: dict[str, IdempotencyRecord] = {}
+        self._lock = asyncio.Lock()
 
     async def get(self, event_id: str) -> IdempotencyRecord:
-        return self._records.get(
-            event_id,
-            IdempotencyRecord(event_id=event_id, status=IdempotencyStatus.NEW),
-        )
+        async with self._lock:
+            return self._records.get(
+                event_id,
+                IdempotencyRecord(event_id=event_id, status=IdempotencyStatus.NEW),
+            )
 
     async def start(self, event_id: str, *, ttl_seconds: int) -> bool:
-        """Acquire idempotency lock. Return False if already processing or completed."""
-        current = await self.get(event_id)
-        if current.status in (IdempotencyStatus.PROCESSING, IdempotencyStatus.COMPLETED):
-            return False
-        self._records[event_id] = IdempotencyRecord(
-            event_id=event_id,
-            status=IdempotencyStatus.PROCESSING,
-        )
-        return True
+        """Acquire idempotency lock. Return False if already processing or completed.
+
+        Uses asyncio.Lock to prevent race conditions in concurrent scenarios.
+
+        Note: ttl_seconds is ignored in this in-memory adapter. Records persist
+        for the lifetime of the process.
+        """
+        async with self._lock:
+            current = self._records.get(
+                event_id,
+                IdempotencyRecord(event_id=event_id, status=IdempotencyStatus.NEW),
+            )
+            if current.status in (
+                IdempotencyStatus.PROCESSING,
+                IdempotencyStatus.COMPLETED,
+            ):
+                return False
+            self._records[event_id] = IdempotencyRecord(
+                event_id=event_id,
+                status=IdempotencyStatus.PROCESSING,
+            )
+            return True
 
     async def complete(
         self,
@@ -44,11 +69,17 @@ class InMemoryIdempotencyStore(IdempotencyStore):
         receipt: GenerationReceipt,
         ttl_seconds: int,
     ) -> None:
-        self._records[event_id] = IdempotencyRecord(
-            event_id=event_id,
-            status=IdempotencyStatus.COMPLETED,
-            receipt=receipt,
-        )
+        """Mark event as completed with receipt.
+
+        Note: ttl_seconds is ignored in this in-memory adapter. Records persist
+        for the lifetime of the process.
+        """
+        async with self._lock:
+            self._records[event_id] = IdempotencyRecord(
+                event_id=event_id,
+                status=IdempotencyStatus.COMPLETED,
+                receipt=receipt,
+            )
 
     async def fail(
         self,
@@ -57,11 +88,17 @@ class InMemoryIdempotencyStore(IdempotencyStore):
         error_message: str,
         ttl_seconds: int,
     ) -> None:
-        self._records[event_id] = IdempotencyRecord(
-            event_id=event_id,
-            status=IdempotencyStatus.FAILED,
-            error_message=error_message,
-        )
+        """Mark event as failed with error message.
+
+        Note: ttl_seconds is ignored in this in-memory adapter. Records persist
+        for the lifetime of the process.
+        """
+        async with self._lock:
+            self._records[event_id] = IdempotencyRecord(
+                event_id=event_id,
+                status=IdempotencyStatus.FAILED,
+                error_message=error_message,
+            )
 
 
 class InMemoryQuestionSetRepository(QuestionSetRepository):

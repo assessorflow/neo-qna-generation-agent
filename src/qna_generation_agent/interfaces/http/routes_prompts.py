@@ -1,72 +1,67 @@
 """HTTP routes for testing Langfuse prompts.
 
 These endpoints are available when ENABLE_TEST_ROUTES=true or in non-production
-environments. They allow testing of individual prompts via Strands workflow execution.
+environments. They allow testing of individual prompts via Strands Agent execution.
 """
 
 from __future__ import annotations
 
-from blacksheep import Application, FromJSON, Response
+from blacksheep import Application, FromJSON, Request, Response
 from blacksheep.server.responses import json
 
 from qna_generation_agent.app.bootstrap import ApplicationContainer
 from qna_generation_agent.app.logging import get_logger
 from qna_generation_agent.application.services.prompt_test_service import (
     PromptTestResult,
-    PromptTestService,
 )
 from qna_generation_agent.interfaces.http.schemas import (
     AssessmentGeneratorTestRequest,
+    ErrorResponse,
     MCQAnswerGeneratorTestRequest,
     MCQExplanationGeneratorTestRequest,
     PromptTestResponse,
 )
 
+
+def _resolve_request_id(request: Request) -> str:
+    """Extract request ID from headers or generate new one."""
+    import uuid
+
+    raw_request_id = request.get_first_header(
+        b"x-request-id"
+    ) or request.get_first_header(b"x-correlation-id")
+    if raw_request_id is None:
+        return str(uuid.uuid4())
+    return raw_request_id.decode("utf-8")
+
+
 logger = get_logger(__name__)
 
 
-def _get_test_service(container: ApplicationContainer) -> PromptTestService:
-    """Get or create the PromptTestService from container settings.
+def _get_test_service_error(
+    container: ApplicationContainer,
+) -> tuple[str, int] | None:
+    """Check if PromptTestService is available and return error if not.
 
     Args:
         container: The application container with settings.
 
     Returns:
-        Configured PromptTestService instance.
-
-    Raises:
-        RuntimeError: If Langfuse is not configured (prompt provider unavailable).
+        None if service is available, otherwise a tuple of (error_message, status_code).
     """
-    settings = container.settings
-
-    # Check if we have a prompt provider (requires Langfuse)
-    if not settings.langfuse_enabled:
-        raise RuntimeError(
-            "Prompt testing requires Langfuse. "
-            "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY."
-        )
-
-    # We need to create a new PromptTestService (not shared with main workflow)
-    # because it has different initialization requirements
-    from qna_generation_agent.infrastructure.llm.langfuse_prompt_provider import (
-        LangfusePromptProvider,
-    )
-
-    prompt_provider = LangfusePromptProvider(
-        public_key=settings.langfuse_public_key,
-        secret_key=settings.langfuse_secret_key,
-        host=settings.langfuse_base_url,
-        environment=settings.environment.value,
-        release=settings.release,
-    )
-
-    return PromptTestService(
-        model_id=settings.model_id,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        timeout_seconds=settings.llm_timeout_seconds,
-        prompt_provider=prompt_provider,
-    )
+    if container.prompt_test_service is None:
+        if not container.settings.enable_test_routes:
+            return (
+                "Prompt testing is disabled. Set ENABLE_TEST_ROUTES=true to enable.",
+                503,
+            )
+        if not container.settings.langfuse_enabled:
+            return (
+                "Prompt testing requires Langfuse. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY.",
+                503,
+            )
+        return ("Prompt test service is not available.", 503)
+    return None
 
 
 def _make_response(result: PromptTestResult) -> Response:
@@ -87,7 +82,17 @@ def _make_response(result: PromptTestResult) -> Response:
         error=result.error,
     )
 
-    status = 200 if response_data.success else 500
+    # Map errors to appropriate status codes
+    if result.error:
+        if "disabled" in result.error.lower():
+            status = 503
+        elif "langfuse" in result.error.lower():
+            status = 503
+        else:
+            status = 500
+    else:
+        status = 200
+
     return json(response_data.model_dump(mode="json"), status=status)
 
 
@@ -103,6 +108,7 @@ def register_prompt_test_routes(app: Application) -> None:
 
     @app.router.post("/test/prompt/assessment")
     async def test_assessment_generator(
+        request: Request,
         request_body: FromJSON[AssessmentGeneratorTestRequest],
         container: ApplicationContainer,
     ) -> Response:
@@ -128,14 +134,23 @@ def register_prompt_test_routes(app: Application) -> None:
         Returns:
             PromptTestResponse with parsed AssessmentGeneratorOutputSchema.
         """
-        try:
-            service = _get_test_service(container)
-        except RuntimeError as e:
-            return json({"error": str(e)}, status=503)
+        error = _get_test_service_error(container)
+        if error is not None:
+            error_message, status = error
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(error=error_message, request_id=request_id).model_dump(
+                    mode="json"
+                ),
+                status=status,
+            )
+
+        # Service is available (checked by _get_test_service_error)
+        assert container.prompt_test_service is not None
 
         body = request_body.value
 
-        result = await service.test_assessment_generator(
+        result = await container.prompt_test_service.test_assessment_generator(
             structured_count=body.structured_count,
             non_structured_count=body.non_structured_count,
             difficulty=body.difficulty,
@@ -147,6 +162,7 @@ def register_prompt_test_routes(app: Application) -> None:
 
     @app.router.post("/test/prompt/mcq-answer")
     async def test_mcq_answer_generator(
+        request: Request,
         request_body: FromJSON[MCQAnswerGeneratorTestRequest],
         container: ApplicationContainer,
     ) -> Response:
@@ -168,14 +184,23 @@ def register_prompt_test_routes(app: Application) -> None:
         Returns:
             PromptTestResponse with parsed MCQAnswerGeneratorOutputSchema.
         """
-        try:
-            service = _get_test_service(container)
-        except RuntimeError as e:
-            return json({"error": str(e)}, status=503)
+        error = _get_test_service_error(container)
+        if error is not None:
+            error_message, status = error
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(error=error_message, request_id=request_id).model_dump(
+                    mode="json"
+                ),
+                status=status,
+            )
+
+        # Service is available (checked by _get_test_service_error)
+        assert container.prompt_test_service is not None
 
         body = request_body.value
 
-        result = await service.test_mcq_answer_generator(
+        result = await container.prompt_test_service.test_mcq_answer_generator(
             question_stem=body.question_stem,
             grammar_target=body.grammar_target,
             difficulty=body.difficulty,
@@ -186,6 +211,7 @@ def register_prompt_test_routes(app: Application) -> None:
 
     @app.router.post("/test/prompt/mcq-explanation")
     async def test_mcq_explanation_generator(
+        request: Request,
         request_body: FromJSON[MCQExplanationGeneratorTestRequest],
         container: ApplicationContainer,
     ) -> Response:
@@ -212,14 +238,23 @@ def register_prompt_test_routes(app: Application) -> None:
         Returns:
             PromptTestResponse with parsed MCQExplanationOutputSchema.
         """
-        try:
-            service = _get_test_service(container)
-        except RuntimeError as e:
-            return json({"error": str(e)}, status=503)
+        error = _get_test_service_error(container)
+        if error is not None:
+            error_message, status = error
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(error=error_message, request_id=request_id).model_dump(
+                    mode="json"
+                ),
+                status=status,
+            )
+
+        # Service is available (checked by _get_test_service_error)
+        assert container.prompt_test_service is not None
 
         body = request_body.value
 
-        result = await service.test_mcq_explanation_generator(
+        result = await container.prompt_test_service.test_mcq_explanation_generator(
             question=body.question,
             options=body.options,
             correct_answer=body.correct_answer,

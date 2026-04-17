@@ -25,6 +25,7 @@ flowchart TB
         subgraph "Application Layer"
             Commands[Command Handlers]
             Services[GenerateQnAService]
+            PromptTest[PromptTestService]
             Ports[Repository Ports]
         end
 
@@ -43,6 +44,8 @@ flowchart TB
     Services -->|Publish Results| Submission
     Services -->|Trace| Telemetry
     HTTP -->|Health Checks| Core
+    HTTP -->|Test Prompts| PromptTest
+    PromptTest -->|Execute| LLM
 ```
 
 ### Event Flow
@@ -60,10 +63,13 @@ sequenceDiagram
     PS->>QNA: Deliver message
     QNA->>LF: Fetch Assessment Generator prompt
     LF-->>QNA: Return prompt with variables
-    QNA->>KS: gRPC: GetChunksByIds
+    QNA->>KS: gRPC: GetTopics
+    KS-->>QNA: Return topics and subtopics
+    QNA->>KS: gRPC: SimilaritySearch (per subtopic)
     KS-->>QNA: Return document chunks
-    QNA->>QNA: Generate questions via LLM
+    QNA->>QNA: Generate questions via 3-prompt workflow
     QNA->>SS: gRPC: CreateQuestionSet
+    QNA->>SS: gRPC: WriteGeneratedQuestions
     QNA->>PS: Publish completion event
 ```
 
@@ -74,7 +80,7 @@ sequenceDiagram
 | Runtime | Python 3.13+ | Async-first Python with strict typing |
 | HTTP Server | Granian + BlackSheep | High-performance ASGI server |
 | Message Bus | Google Cloud Pub/Sub | Event-driven communication |
-| Persistence | In-Memory | Question sets, idempotency (extensible to external stores) |
+| Persistence | In-Memory | Question sets, idempotency (extensible) |
 | LLM Integration | Strands Agents | Structured output generation |
 | Prompt Management | Langfuse | Versioned prompt storage and retrieval |
 | Telemetry | Langfuse | Distributed tracing and observability |
@@ -85,16 +91,17 @@ sequenceDiagram
 
 ```
 src/qna_generation_agent/
-├── app/                    # Settings, bootstrap, JSON, logging
+├── app/                    # Settings, bootstrap, JSON, logging, lifespan
 │   ├── bootstrap.py        # DI container initialization
+│   ├── lifespan.py         # Runtime state and health management
 │   ├── logging.py          # Structured JSON logging
 │   ├── json.py             # orjson wrappers
 │   └── settings.py         # Environment configuration
 ├── application/            # Use cases, DTOs, ports, services
 │   ├── commands.py         # Command handlers
 │   ├── dto.py              # Data transfer objects
-│   ├── services/           # GenerateQnAService
-│   └── ports/              # Repository interfaces (LLM, prompts, telemetry)
+│   ├── services/           # GenerateQnAService, PromptTestService
+│   └── ports/              # Repository interfaces
 ├── domain/                 # Entities, value objects, enums, events
 │   ├── entities.py         # Question, Answer, QuestionSet
 │   ├── enums.py            # QuestionType, DifficultyLevel
@@ -102,13 +109,13 @@ src/qna_generation_agent/
 │   ├── errors.py           # Domain errors
 │   └── value_objects.py    # Type-safe IDs
 ├── infrastructure/         # External adapters
-│   ├── llm/                # LLM provider (Strands) + Prompt provider (Langfuse)
+│   ├── llm/                # Strands provider, Langfuse prompt provider
 │   ├── messaging/          # Pub/Sub publisher/subscriber
 │   ├── persistence/        # In-memory repositories
 │   ├── grpc/               # gRPC clients
 │   └── telemetry/          # Langfuse tracing
 └── interfaces/
-    ├── http/               # HTTP server endpoints
+    ├── http/               # HTTP server (health, prompt testing)
     └── serve/              # Unified HTTP + Pub/Sub process
 ```
 
@@ -144,21 +151,32 @@ pip install -e ".[dev,test,lint]"
 | `OPENAI_API_KEY` | Yes | - | OpenAI API key for LLM |
 | `OPENAI_MODEL` | Yes | - | Model ID (e.g., `gpt-4o`) |
 | `OPENAI_BASE_URL` | Yes | - | OpenAI API base URL |
+| `OPENAI_TEMPERATURE` | No | `0.2` | LLM temperature |
+| `OPENAI_MAX_OUTPUT_TOKENS` | No | `4096` | Max tokens per request |
 | `SUBMISSION_SERVICE_URL` | Yes | - | gRPC URL for submission service |
 | `KNOWLEDGE_SERVICE_URL` | Yes | - | gRPC URL for knowledge service |
+| `GRPC_TIMEOUT_SECONDS` | No | `30.0` | gRPC call timeout |
+| `GRPC_TLS_ENABLED` | No | `false` | Enable TLS for gRPC |
+| `GRPC_TLS_CERT_PATH` | No | - | Path to TLS CA certificate |
 | `HOST` | No | `0.0.0.0` | HTTP server host |
 | `PORT` | No | `8000` | HTTP server port |
 | `LOG_LEVEL` | No | `info` | Logging level |
 | `PUBSUB_PROJECT_ID` | No | - | GCP project ID |
 | `PUBSUB_SUBSCRIPTION_TRIGGER` | No | - | Pub/Sub subscription name |
 | `PUBSUB_TOPIC_COMPLETE` | No | - | Pub/Sub topic for completion |
+| `PUBSUB_TOPIC_DECISION_AUDIT` | No | - | Topic for decision audit events |
+| `PUBSUB_TOPIC_TOKEN_USAGE` | No | - | Topic for token usage events |
+| `PUBSUB_TOPIC_TRIGGER_DLQ` | No | - | Dead letter queue topic |
 | `LANGFUSE_PUBLIC_KEY` | No | - | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | No | - | Langfuse secret key |
 | `LANGFUSE_BASE_URL` | No | `https://cloud.langfuse.com` | Langfuse host |
-| `CORS_ALLOWED_ORIGINS` | No | - | Comma-separated allowed origins |
-| `GRPC_TLS_ENABLED` | No | `false` | Enable gRPC TLS |
-| `GRPC_TLS_CERT_PATH` | No | - | Path to TLS CA certificate |
+| `PROMPT_LABEL` | No | `production` | Default prompt label |
 | `ENABLE_TEST_ROUTES` | No | `false` | Enable `/test/*` debug endpoints |
+| `QA_GEN_MAX_ITERATIONS` | No | `3` | Max regeneration iterations |
+| `QA_GEN_TIMEOUT_MS` | No | `30000` | Generation timeout (ms) |
+| `LLM_TIMEOUT_SECONDS` | No | `120` | LLM call timeout |
+| `CORS_ALLOWED_ORIGINS` | No | - | Comma-separated allowed origins |
+| `CORS_ALLOW_CREDENTIALS` | No | `false` | Enable CORS credentials |
 
 ### Example .env File
 
@@ -209,7 +227,7 @@ This single process handles both HTTP health checks and Pub/Sub message consumpt
 |----------|-------------|
 | `GET /healthz` | Basic health check |
 | `GET /livez` | Kubernetes liveness probe |
-| `GET /readyz` | Readiness probe with dependency checks (Pub/Sub, LLM, Prompt Provider) |
+| `GET /readyz` | Readiness probe with dependency checks (Pub/Sub, LLM, Prompt Provider, gRPC services) |
 | `GET /version` | Application version and environment |
 | `GET /docs` | Swagger UI documentation |
 
@@ -237,7 +255,7 @@ Response example:
 
 ### Prompt Testing Endpoints (Development)
 
-When `ENABLE_TEST_ROUTES=true` or in non-production environments, three endpoints are available for testing individual Langfuse prompts via Strands workflow execution:
+When `ENABLE_TEST_ROUTES=true` AND Langfuse is configured, three endpoints are available for testing individual Langfuse prompts via direct Strands Agent execution:
 
 | Endpoint | Method | Description | Default Values |
 |----------|--------|-------------|----------------|
@@ -250,7 +268,7 @@ These endpoints return:
 - `prompt_version`: Which Langfuse prompt version was used
 - `execution_time_ms`: Duration of the workflow execution
 - `result`: Parsed structured output from the LLM
-- `raw_output`: Raw LLM response (for debugging)
+- `error`: Error message (if failed)
 
 **Example:**
 
@@ -273,8 +291,9 @@ curl -X POST http://localhost:8000/test/prompt/assessment \
 ```
 
 **Requirements:**
+- `ENABLE_TEST_ROUTES=true` must be set
 - Langfuse must be configured (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`)
-- Returns 503 if Langfuse is not available
+- Returns 503 if test routes are disabled or Langfuse is not available
 - Returns 500 if prompt execution fails
 
 ## Prompt Management
@@ -291,80 +310,43 @@ The service integrates with Langfuse for centralized prompt management. Prompts 
 
 ## LLM Generation Workflow
 
-The service supports two LLM provider modes, configurable via `LLM_WORKFLOW_MODE`:
-
-### Mode 1: Sequential Provider (Default)
-Direct sequential calls to Strands Agents for structured output generation.
-
-### Mode 2: Strands Workflow Provider (`LLM_WORKFLOW_MODE=true`)
-A **three-level parallel workflow** using [Strands Agents](https://strandsagents.com/) with the `workflow` tool. This enables efficient parallel generation optimized for ELP assessments.
+The service uses a **sequential 3-prompt workflow** for structured question generation:
 
 ```mermaid
 flowchart TB
-    subgraph "Workflow Architecture"
-        O[Orchestrator Agent - tools: workflow]
+    subgraph "3-Prompt Sequential Workflow"
+        Start[Input: Context + Count + Difficulty]
 
-        subgraph "Level 1: Assessment Generation (Parallel by Subtopic)"
-            L1A[Task: Subtopic A Prompt: Assessment Generator]
-            L1B[Task: Subtopic B Prompt: Assessment Generator]
-            L1N[Task: Subtopic N Prompt: Assessment Generator]
-        end
+        Step1[Step 1: Assessment Generator]
+        Step1Output[Output: QuestionStems]
 
-        subgraph "Level 2: MCQ Answer Generation (Parallel by Question)"
-            L2A[Task: Question 1 Prompt: MCQ Answer Generator]
-            L2B[Task: Question 2 Prompt: MCQ Answer Generator]
-            L2N[Task: Question N Prompt: MCQ Answer Generator]
-        end
+        Step2[Step 2: MCQ Answer Generator]
+        Step2Output[Output: MCQAnswers with Distractors]
 
-        subgraph "Level 3: MCQ Explanation Generation (Parallel by Question)"
-            L3A[Task: Question 1 Prompt: MCQ Explanation Generator]
-            L3B[Task: Question 2 Prompt: MCQ Explanation Generator]
-            L3N[Task: Question N Prompt: MCQ Explanation Generator]
-        end
+        Step3[Step 3: MCQ Explanation Generator]
+        Step3Output[Output: Detailed Explanations]
 
-        subgraph "Parallel Track: Non-Structured (Parallel by Subtopic)"
-            NSA[Task: Subtopic A Prompt: Assessment Generator]
-            NSB[Task: Subtopic B Prompt: Assessment Generator]
-        end
+        End[Final: Complete Questions]
     end
 
-    O -->|workflow.create() workflow.start()| L1A
-    O --> L1B
-    O --> L1N
-
-    L1A -->|Output: QuestionStem| L2A
-    L1B --> L2B
-    L1N --> L2N
-
-    L2A -->|Output: MCQAnswer| L3A
-    L2B --> L3B
-    L2N --> L3N
-
-    L3A -->|Output: MCQExplanation| Agg[Final Aggregation]
-    L3B --> Agg
-    L3N --> Agg
-
-    O -.-> NSA
-    O -.-> NSB
-    NSA -->|Output: Non-Structured Questions| Agg
-    NSB --> Agg
+    Start --> Step1
+    Step1 --> Step1Output
+    Step1Output --> Step2
+    Step2 --> Step2Output
+    Step2Output --> Step3
+    Step3 --> Step3Output
+    Step3Output --> End
 ```
 
-#### Workflow Levels
+### Workflow Steps
 
-| Level | Purpose | Parallelism | Output |
-|-------|---------|-------------|--------|
-| **Level 1** | Generate question stems from source chunks | By subtopic | `QuestionStem[]` |
-| **Level 2** | Generate MCQ answers with L1-targeted distractors | By question | `MCQAnswer[]` |
-| **Level 3** | Generate detailed explanations with CEFR analysis | By question | `MCQExplanation[]` |
-| **Parallel Track** | Generate open-ended questions with rubrics | By subtopic | `QuestionDraft[]` |
+| Step | Prompt | Purpose | Output |
+|------|--------|---------|--------|
+| **1** | Assessment Generator | Generate question stems from source chunks | `QuestionStem[]` |
+| **2** | MCQ Answer Generator | Generate MCQ answers with L1-targeted distractors | `MCQAnswer[]` |
+| **3** | MCQ Explanation Generator | Generate detailed explanations with CEFR analysis | `MCQExplanation[]` |
 
-Each level is a **separate workflow** created via:
-```python
-workflow(action="create", workflow_id="...", tasks=[...])
-workflow(action="start", workflow_id="...")
-workflow(action="status", workflow_id="...")  # → Aggregated results
-```
+**Note:** The previous Workflow Provider (using Strands workflow tool) was removed due to production-safety issues including timing-dependent parsing, broken ID aggregation, and brittle exception handling. The sequential workflow is more predictable, debuggable, and reliable.
 
 ### Using Prompts in Code
 
@@ -392,7 +374,7 @@ input_data = AssessmentGeneratorInputSchema(
 compiled_prompt = prompt.compile(**input_data.model_dump())
 
 # Use with Strands for structured output
-result = await agent.invoke_async(
+result = await llm_provider.invoke_with_schema(
     compiled_prompt,
     structured_output_model=AssessmentGeneratorOutputSchema,
 )
@@ -410,7 +392,7 @@ langfuse.create_prompt(
     name="Assessment Generator",
     type="text",
     prompt="""Generate EXACTLY {structured_count} MCQ questions...
-    
+
 Respond in JSON format:
 {{
     "questions": [...]
@@ -619,7 +601,7 @@ Error: Rate limit exceeded
 #### Prompt Provider Not Available
 
 ```
-readyz check fails: prompt_provider_available: false
+readyz check fails: prompt_provider_healthy: false
 ```
 
 **Solution:**
@@ -634,7 +616,7 @@ Process hangs on SIGTERM
 ```
 
 **Solution:**
-- The service has `respawn_failed_workers=False` configured — this prevents Granian from restarting workers on exit
+- The service has `respawn_failed_workers=False` configured
 - Check for long-running message processing in logs
 - Pub/Sub subscriber has a 10-second timeout for in-flight messages
 

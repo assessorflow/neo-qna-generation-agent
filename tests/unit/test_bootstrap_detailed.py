@@ -109,6 +109,7 @@ class TestBuildLlm:
         settings.model_id = "gpt-4o"
         settings.llm_api_key = "test-key"
         settings.llm_base_url = "https://api.openai.com"
+        settings.llm_workflow_mode = False
 
         with patch(
             "qna_generation_agent.app.bootstrap.StrandsLLMProvider"
@@ -290,6 +291,117 @@ class TestApplicationContainer:
 
         # Should not raise
         await container.shutdown()
+
+
+class TestBuildSubscriberBranchSelection:
+    """Tests for _build_subscriber branch selection logic."""
+
+    @pytest.mark.unit
+    def test_returns_none_when_pubsub_disabled(self) -> None:
+        """Test that subscriber is None when pubsub is disabled."""
+        settings = MagicMock()
+        settings.pubsub_enabled = False
+        settings.worker_ready = True
+
+        generate_service = MagicMock()
+
+        result = _build_subscriber(settings, generate_service)
+
+        assert result is None
+
+    @pytest.mark.unit
+    def test_returns_none_when_worker_not_ready(self) -> None:
+        """Test that subscriber is None when worker is not ready."""
+        settings = MagicMock()
+        settings.pubsub_enabled = True
+        settings.worker_ready = False
+
+        generate_service = MagicMock()
+
+        result = _build_subscriber(settings, generate_service)
+
+        assert result is None
+
+    @pytest.mark.unit
+    def test_returns_worker_when_enabled_and_ready(self) -> None:
+        """Test that subscriber is created when enabled and ready."""
+        settings = MagicMock()
+        settings.pubsub_enabled = True
+        settings.worker_ready = True
+        settings.pubsub_project_id = "test-project"
+        settings.pubsub_subscription_trigger = "test-subscription"
+        settings.pubsub_max_workers = 1
+
+        generate_service = MagicMock()
+
+        with patch(
+            "qna_generation_agent.app.bootstrap.PubSubSubscriptionWorker"
+        ) as mock_worker_class:
+            mock_instance = MagicMock()
+            mock_worker_class.return_value = mock_instance
+
+            result = _build_subscriber(settings, generate_service)
+
+            assert result is mock_instance
+            # Verify config values were passed correctly
+            mock_worker_class.assert_called_once()
+            call_args = mock_worker_class.call_args
+            config = call_args[0][0]
+            assert config.project_id == "test-project"
+            assert config.subscription_id == "test-subscription"
+            assert config.max_messages == 1
+
+
+class TestApplicationContainerShutdown:
+    """Tests for container shutdown continuation behavior."""
+
+    @pytest.mark.unit
+    async def test_shutdown_continues_after_individual_failures(self) -> None:
+        """Test that shutdown continues even if individual clients fail."""
+        settings = MagicMock()
+
+        # Create clients that will fail during shutdown
+        failing_subscriber = MagicMock()
+        failing_subscriber.shutdown = AsyncMock(
+            side_effect=RuntimeError("Subscriber failed")
+        )
+
+        failing_telemetry = MagicMock()
+        failing_telemetry.shutdown = AsyncMock(
+            side_effect=RuntimeError("Telemetry failed")
+        )
+
+        # Other clients that should still be called
+        submission_client = MagicMock()
+        submission_client.close = AsyncMock()
+
+        knowledge_client = MagicMock()
+        knowledge_client.close = AsyncMock()
+
+        event_publisher = MagicMock()
+        event_publisher.close = AsyncMock()
+
+        container = ApplicationContainer(
+            settings=settings,
+            llm_provider=None,
+            question_set_repo=MagicMock(),
+            idempotency_store=MagicMock(),
+            event_publisher=event_publisher,
+            telemetry=failing_telemetry,
+            subscriber=failing_subscriber,
+            submission_client=submission_client,
+            knowledge_client=knowledge_client,
+        )
+
+        # Should not raise - should continue after each failure
+        await container.shutdown()
+
+        # All close methods should have been called despite failures
+        failing_subscriber.shutdown.assert_awaited_once()
+        failing_telemetry.shutdown.assert_awaited_once()
+        submission_client.close.assert_awaited_once()
+        knowledge_client.close.assert_awaited_once()
+        event_publisher.close.assert_awaited_once()
 
 
 class TestBootstrapServe:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Final, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from qna_generation_agent.domain.events import (
     QnAGenerationCompleted,
@@ -25,6 +25,8 @@ class FeedbackPayload(BaseModel):
     Spec: Quality Validation Failed - feedback.issues and feedback.action
     """
 
+    model_config = ConfigDict(strict=True)
+
     issues: list[str] = Field(default_factory=list)
     action: str | None = Field(default=None, pattern="^(regenerate|)$")
 
@@ -37,10 +39,12 @@ class TriggerPayload(BaseModel):
     2. Regeneration: assessment_id, question_set_id, validation_result, iteration, feedback
     """
 
+    model_config = ConfigDict(strict=True)
+
     assessment_id: str
     question_set_id: str  # Required for all flows
     validation_result: str | None = Field(default=None, pattern="^(pass|fail|)$")
-    iteration: int | None = None
+    iteration: int | None = Field(default=None, ge=1)
     structured_count: int | None = Field(
         default=None,
         ge=0,
@@ -53,16 +57,23 @@ class TriggerPayload(BaseModel):
             "non_structured_count", "non_structured_generated"
         ),
     )
+    # Constrained to known difficulty values per spec
     difficulty_level: str | None = Field(
         default=None,
+        pattern="^(easy|medium|hard|)$",
         validation_alias=AliasChoices("difficulty_level", "difficulty"),
     )
-    purpose: str | None = None
+    # Constrained to known purpose values per spec
+    purpose: str | None = Field(
+        default=None, pattern="^(assessment|practice|review|topic_revision|)$"
+    )
     feedback: FeedbackPayload | None = None
 
 
 class TriggerEnvelope(BaseModel):
     """Inbound trigger envelope."""
+
+    model_config = ConfigDict(strict=True)
 
     event_id: str
     event_type: Literal["assessorflow.qa-generation.trigger"]
@@ -70,7 +81,23 @@ class TriggerEnvelope(BaseModel):
     timestamp: datetime
     source_agent: str
     correlation_id: str
+    trace_id: str | None = None  # For distributed tracing propagation
     payload: TriggerPayload
+
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def parse_timestamp(cls, value: datetime | str) -> datetime:
+        """Parse timestamp from string if needed.
+
+        Pub/Sub messages encode timestamps as ISO format strings.
+        This validator accepts both datetime objects and ISO strings.
+        """
+        if isinstance(value, str):
+            # Handle ISO format with or without timezone
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            return datetime.fromisoformat(value)
+        return value
 
     def to_domain_event(self) -> QnAGenerationTriggered:
         return QnAGenerationTriggered(
@@ -88,6 +115,7 @@ class TriggerEnvelope(BaseModel):
             if self.payload.feedback
             else [],
             correlation_id=self.correlation_id,
+            trace_id=self.trace_id,
             timestamp=self.timestamp,
         )
 

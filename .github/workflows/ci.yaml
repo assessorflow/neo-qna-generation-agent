@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@@v8.0.0
+        uses: astral-sh/setup-uv@v5.4.2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@@v8.0.0
+        uses: astral-sh/setup-uv@v5.4.2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@@v8.0.0
+        uses: astral-sh/setup-uv@v5.4.2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -68,10 +68,10 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run unit tests
-        run: uv run pytest tests/unit/ -v --cov=src --cov-report=xml
+        run: uv run pytest tests/unit/ -v --cov=qna_generation_agent --cov-report=xml
 
       - name: Run integration tests
-        run: uv run pytest tests/integration/ -v --cov=src --cov-report=xml --cov-append --cov-fail-under=80
+        run: uv run pytest tests/integration/ -v --cov=qna_generation_agent --cov-report=xml --cov-append --cov-fail-under=80
 
       - name: Upload coverage
         uses: codecov/codecov-action@v6
@@ -96,6 +96,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: deployments/container/Containerfile
           push: false
           load: true
           tags: qna-generation-agent:test
