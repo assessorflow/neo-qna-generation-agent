@@ -483,7 +483,7 @@ GRPC_TLS_CERT_PATH=/path/to/ca-cert.pem  # Optional: custom CA
 
 ## Deployment
 
-### Docker
+### Container
 
 See `deployments/container/Containerfile` for the production multi-stage build:
 
