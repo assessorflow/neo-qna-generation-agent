@@ -485,17 +485,41 @@ GRPC_TLS_CERT_PATH=/path/to/ca-cert.pem  # Optional: custom CA
 
 ### Docker
 
+See `deployments/container/Containerfile` for the production multi-stage build:
+
 ```dockerfile
-FROM python:3.13-slim
+FROM rockylinux/rockylinux:10-ubi AS builder
 
-WORKDIR /app
-COPY pyproject.toml uv.lock ./
-RUN pip install uv && uv sync
+ENV UV_CACHE_DIR=/tmp/uv-cache \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/app/.venv
 
-COPY src/ ./src/
-EXPOSE 8000
+WORKDIR /workspace
 
-CMD ["uv", "run", "qna-serve"]
+COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev --no-editable --active
+
+FROM rockylinux/rockylinux:10-ubi
+
+ENV VIRTUAL_ENV=/opt/app/.venv \
+    PATH=/opt/app/.venv/bin:$PATH \
+    PYTHONPATH=/opt/app/src
+
+COPY --from=builder /opt/app/.venv /opt/app/.venv
+COPY --from=builder /workspace/src /opt/app/src
+
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup -s /sbin/nologin appuser
+USER 10001:10001
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/app/.venv/bin/python", "-m", "granian"]
+CMD ["--interface", "asgi", "--host", "0.0.0.0", "--port", "8080", "qna_generation_agent.interfaces.serve.app:app"]
 ```
 
 ### Kubernetes
@@ -519,7 +543,7 @@ spec:
         - name: app
           image: neo-qna-generation-agent:latest
           ports:
-            - containerPort: 8000
+            - containerPort: 8080
           envFrom:
             - secretRef:
                 name: qna-secrets
@@ -528,11 +552,11 @@ spec:
           livenessProbe:
             httpGet:
               path: /livez
-              port: 8000
+              port: 8080
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8000
+              port: 8080
           lifecycle:
             preStop:
               exec:
