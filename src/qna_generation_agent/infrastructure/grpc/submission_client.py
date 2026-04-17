@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import Any
 
 import grpc
@@ -22,7 +21,11 @@ from qna_generation_agent.application.ports.submission_client import (
     WriteGeneratedQuestionsCommand,
     WriteGeneratedQuestionsResult,
 )
-from qna_generation_agent.infrastructure.grpc.channel import create_channel
+from qna_generation_agent.infrastructure.grpc.channel import (
+    create_channel,
+    get_grpc_metadata,
+    handle_grpc_error,
+)
 from qna_generation_agent.infrastructure.grpc.stubs.assessorflow.submission.v1.submission_pb2 import (  # type: ignore[attr-defined]
     CreateQuestionSetRequest,
     IncrementIterationRequest,
@@ -36,15 +39,6 @@ from qna_generation_agent.infrastructure.grpc.stubs.assessorflow.submission.v1.s
 )
 
 logger = get_logger(__name__)
-
-# gRPC status codes that indicate transient (retryable) failures
-_RETRYABLE_CODES: frozenset[grpc.StatusCode] = frozenset(
-    {
-        grpc.StatusCode.UNAVAILABLE,
-        grpc.StatusCode.DEADLINE_EXCEEDED,
-        grpc.StatusCode.RESOURCE_EXHAUSTED,
-    }
-)
 
 
 class GrpcSubmissionClient(SubmissionClient):
@@ -76,13 +70,74 @@ class GrpcSubmissionClient(SubmissionClient):
         self,
         command: Any,  # GetAssessmentConfigCommand
     ) -> Any:  # AssessmentConfig
-        """Stub: GetAssessmentConfig not yet implemented in proto.
+        """Get assessment configuration from Submission Service.
 
-        This method is defined in the spec but not yet available
-        in the gRPC service. Use trigger payload data instead.
+        Retrieves the authoritative assessment config including generation
+        parameters for regeneration scenarios.
         """
-        raise StoragePermanentError(
-            "GetAssessmentConfig not yet implemented in Submission Service proto"
+        from qna_generation_agent.application.ports.submission_client import (
+            AssessmentConfig,
+        )
+
+        if self._stub is None:
+            raise StorageTransientError(
+                "Submission Service client is closed",
+                retry_after_seconds=5,
+            )
+
+        # Import proto types dynamically to avoid issues if proto not yet updated
+        try:
+            from qna_generation_agent.infrastructure.grpc.stubs.assessorflow.submission.v1.submission_pb2 import (  # type: ignore[attr-defined]
+                GetAssessmentConfigRequest,
+            )
+        except ImportError as e:
+            # Proto not yet updated - use fallback response
+            logger.warning("get_assessment_config_proto_not_available", error=str(e))
+            raise StoragePermanentError(
+                "GetAssessmentConfig proto not yet available",
+                details=str(e),
+            ) from e
+
+        request = GetAssessmentConfigRequest(
+            assessment_id=command.assessment_id,
+            workflow_id=command.workflow_id,
+        )
+
+        metadata = get_grpc_metadata()
+        try:
+            response = await self._stub.GetAssessmentConfig(
+                request,
+                timeout=self._timeout_seconds,
+                metadata=metadata,
+            )
+        except grpc.aio.AioRpcError as error:
+            if error.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise StoragePermanentError(
+                    "GetAssessmentConfig not yet implemented in Submission Service",
+                    code=str(error.code()),
+                    details=error.details(),
+                ) from error
+            raise handle_grpc_error(error, "Submission Service") from error
+
+        return AssessmentConfig(
+            assessment_id=response.assessment_id,
+            workflow_id=response.workflow_id,
+            assessor_id=response.assessor_id,
+            assessment_title=response.assessment_title,
+            purpose=response.purpose if hasattr(response, "purpose") else None,
+            duration_minutes=response.duration_minutes,
+            difficulty_level=response.difficulty_level
+            if hasattr(response, "difficulty_level")
+            else None,
+            structured_question_count=response.structured_question_count
+            if hasattr(response, "structured_question_count")
+            else 0,
+            non_structured_question_count=response.non_structured_question_count
+            if hasattr(response, "non_structured_question_count")
+            else 0,
+            web_research_mode=response.web_research_mode,
+            status=response.status,
+            deadline=response.deadline if hasattr(response, "deadline") else None,
         )
 
     async def create_question_set(
@@ -99,33 +154,24 @@ class GrpcSubmissionClient(SubmissionClient):
             workflow_id=command.workflow_id,
         )
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.CreateQuestionSet(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Submission Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Submission Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Submission Service") from error
 
-        # Note: The proto doesn't return created_at, workflow_id, iteration_count
-        # Using defaults for backwards compatibility
+        # Only populate fields returned by the server
+        # Server may not return: created_at, workflow_id, iteration_count
         return QuestionSetRecord(
             id=response.question_set_id,
-            workflow_id=command.workflow_id,
-            iteration_count=0,
+            workflow_id=getattr(response, "workflow_id", command.workflow_id),
+            iteration_count=getattr(response, "iteration_count", 0),
             status=response.status,
-            created_at=datetime.now(UTC),
+            created_at=None,
         )
 
     async def write_generated_questions(
@@ -157,24 +203,15 @@ class GrpcSubmissionClient(SubmissionClient):
             questions=proto_questions,
         )
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.WriteGeneratedQuestions(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Submission Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Submission Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Submission Service") from error
 
         return WriteGeneratedQuestionsResult(
             questions_written=response.questions_written,
@@ -195,24 +232,15 @@ class GrpcSubmissionClient(SubmissionClient):
             question_set_id=command.question_set_id,
         )
 
+        metadata = get_grpc_metadata()
         try:
             response = await self._stub.IncrementQuestionSetIteration(
                 request,
                 timeout=self._timeout_seconds,
+                metadata=metadata,
             )
         except grpc.aio.AioRpcError as error:
-            if error.code() in _RETRYABLE_CODES:
-                raise StorageTransientError(
-                    "Submission Service temporarily unavailable",
-                    retry_after_seconds=5,
-                    code=str(error.code()),
-                    details=error.details(),
-                ) from error
-            raise StoragePermanentError(
-                "Submission Service call failed",
-                code=str(error.code()),
-                details=error.details(),
-            ) from error
+            raise handle_grpc_error(error, "Submission Service") from error
 
         return IncrementIterationResult(
             question_set_id=response.question_set_id,
@@ -233,31 +261,30 @@ class GrpcSubmissionClient(SubmissionClient):
     async def health_check(self) -> bool:
         """Check connectivity to the Submission Service.
 
-        Attempts a lightweight CreateQuestionSet call with minimal data.
-        This verifies the service is responsive (even if the call fails validation).
-        Treats auth/permission errors as unhealthy (misconfiguration).
+        Uses gRPC channel connectivity state to verify the service is reachable
+        without performing any mutating operations. This avoids creating
+        test records in the submission system.
         """
         if self._channel is None or self._stub is None:
             return False
+
         try:
+            # Check if channel is in a ready state
+            channel_state = self._channel.get_state(try_to_connect=True)
+            if channel_state == grpc.ChannelConnectivity.READY:
+                return True
+
+            # Wait briefly for connection attempt
             async with asyncio.timeout(5.0):
-                request = CreateQuestionSetRequest(workflow_id="health-check")
-                await self._stub.CreateQuestionSet(request, timeout=5.0)
-            return True
-        except grpc.aio.AioRpcError as error:
-            # UNAVAILABLE means service is not reachable
-            if error.code() == grpc.StatusCode.UNAVAILABLE:
-                logger.warning("submission_service_unavailable", error=str(error))
-                return False
-            # Auth/permission errors indicate misconfiguration - unhealthy
-            if error.code() in (
-                grpc.StatusCode.UNAUTHENTICATED,
-                grpc.StatusCode.PERMISSION_DENIED,
-            ):
-                logger.error("submission_service_auth_failed", error=str(error))
-                return False
-            # Any other error means the service is reachable but rejected the request
-            return True
+                # Try to connect and wait for READY state
+                await self._channel.wait_for_state_change(channel_state)
+                new_state: grpc.ChannelConnectivity = self._channel.get_state()
+                is_ready: bool = new_state == grpc.ChannelConnectivity.READY
+                return is_ready
+
+        except TimeoutError:
+            logger.warning("submission_health_check_timeout")
+            return False
         except Exception as error:
             logger.warning("submission_health_check_failed", error=str(error))
             return False
