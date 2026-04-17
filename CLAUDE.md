@@ -190,6 +190,22 @@ for question in questions:
 
 **Note:** The previous `WorkflowLLMProvider` was removed due to production-safety issues (timing-dependent parsing, broken ID aggregation, brittle exception handling). The sequential workflow is more predictable and debuggable.
 
+### Cost-Optimized Model Routing
+
+The 3-prompt workflow uses tiered model routing to optimize costs while maintaining quality:
+
+| Step | Prompt | Model Tier | Purpose |
+|------|--------|------------|---------|
+| 1 | Assessment Generator | **EXPENSIVE** | Creative question stems requiring high-quality reasoning |
+| 2 | MCQ Answer Generator | **CHEAP** | Structured distractor generation |
+| 3 | MCQ Explanation Generator | **CHEAP** | Structured explanation generation |
+
+Configure via environment variables:
+- `EXPENSIVE_MODEL_ID` — High-quality model (defaults to `OPENAI_MODEL`)
+- `CHEAP_MODEL_ID` — Cost-optimized model (defaults to `OPENAI_MODEL`)
+
+When `CHEAP_MODEL_ID` is not configured, all stages use the expensive model for backwards compatibility.
+
 ### Prompt Management Architecture
 
 **Use `/langfuse` skill for prompt management SDK questions.**
@@ -228,6 +244,8 @@ Environment variables (loaded from `.env`):
 - `PUBSUB_ENABLED` — Enable/disable Pub/Sub (default: `true`)
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` — Prompt management AND telemetry
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` — LLM configuration
+- `CHEAP_MODEL_ID` — Cost-optimized model for MCQ answer/explanation (defaults to `OPENAI_MODEL`)
+- `EXPENSIVE_MODEL_ID` — High-quality model for assessment generation (defaults to `OPENAI_MODEL`)
 - `OPENAI_TEMPERATURE` — LLM temperature (default: `0.2`)
 - `OPENAI_MAX_OUTPUT_TOKENS` — Max tokens per request (default: `4096`)
 - `SUBMISSION_SERVICE_URL` — gRPC URL for Assessment Submission Service

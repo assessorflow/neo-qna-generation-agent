@@ -150,6 +150,8 @@ pip install -e ".[dev,test,lint]"
 |----------|----------|---------|-------------|
 | `OPENAI_API_KEY` | Yes | - | OpenAI API key for LLM |
 | `OPENAI_MODEL` | Yes | - | Model ID (e.g., `gpt-4o`) |
+| `CHEAP_MODEL_ID` | No | `OPENAI_MODEL` | Cost-optimized model for MCQ answer/explanation |
+| `EXPENSIVE_MODEL_ID` | No | `OPENAI_MODEL` | High-quality model for assessment generation |
 | `OPENAI_BASE_URL` | Yes | - | OpenAI API base URL |
 | `OPENAI_TEMPERATURE` | No | `0.2` | LLM temperature |
 | `OPENAI_MAX_OUTPUT_TOKENS` | No | `4096` | Max tokens per request |
@@ -185,6 +187,12 @@ pip install -e ".[dev,test,lint]"
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 OPENAI_BASE_URL=https://api.openai.com
+
+# Optional: Cost-optimized model tiers
+# CHEAP_MODEL_ID: Used for MCQ answer/explanation generation (less expensive)
+# EXPENSIVE_MODEL_ID: Used for assessment generation (higher quality)
+CHEAP_MODEL_ID=google/gemma-3-27b-it
+EXPENSIVE_MODEL_ID=anthropic/claude-sonnet-4
 
 # Service dependencies
 SUBMISSION_SERVICE_URL=grpc://localhost:50051
