@@ -166,6 +166,7 @@ def _build_llm(settings: Settings, model_id: str) -> LLMProvider:
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         timeout_seconds=settings.llm_timeout_seconds,
+        max_tokens=settings.openai_max_output_tokens,
     )
 
 

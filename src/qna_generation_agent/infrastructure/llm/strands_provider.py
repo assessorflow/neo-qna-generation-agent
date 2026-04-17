@@ -54,6 +54,7 @@ class StrandsLLMProvider(LLMProvider):
         api_key: str,
         base_url: str | None,
         timeout_seconds: int,
+        max_tokens: int = 4096,
     ) -> None:
         if model_provider != "openai":
             raise LLMPermanentError(
@@ -76,7 +77,7 @@ class StrandsLLMProvider(LLMProvider):
             },
             model_id=model_id,
             params={
-                "max_tokens": 2000,
+                "max_tokens": max_tokens,
                 "temperature": 0.7,
             },
         )
