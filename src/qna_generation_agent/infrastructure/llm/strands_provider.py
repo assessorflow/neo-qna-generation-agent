@@ -55,6 +55,7 @@ class StrandsLLMProvider(LLMProvider):
         base_url: str | None,
         timeout_seconds: int,
         max_tokens: int = 4096,
+        temperature: float = 0.2,
     ) -> None:
         if model_provider != "openai":
             raise LLMPermanentError(
@@ -78,7 +79,7 @@ class StrandsLLMProvider(LLMProvider):
             model_id=model_id,
             params={
                 "max_tokens": max_tokens,
-                "temperature": 0.7,
+                "temperature": temperature,
             },
         )
         self._structured_agent = Agent(
