@@ -117,7 +117,7 @@ class TestBuildLlm:
             mock_instance = MagicMock()
             mock_provider.return_value = mock_instance
 
-            result = _build_llm(settings)
+            result = _build_llm(settings, "gpt-4o")
 
             assert result is mock_instance
 

@@ -74,6 +74,8 @@ class ApplicationContainer:
     prompt_provider: PromptProvider | None = None
     generate_service: GenerateQnAService | None = None
     prompt_test_service: PromptTestService | None = None
+    cheap_llm_provider: LLMProvider | None = None
+    expensive_llm_provider: LLMProvider | None = None
 
     async def startup(self) -> None:
         """Initialize external clients."""
@@ -146,8 +148,8 @@ def _build_telemetry(settings: Settings) -> TelemetryPort | None:
     )
 
 
-def _build_llm(settings: Settings) -> LLMProvider:
-    """Build LLM provider.
+def _build_llm(settings: Settings, model_id: str) -> LLMProvider:
+    """Build LLM provider with specified model.
 
     Uses StrandsLLMProvider with sequential 3-prompt workflow.
     The previous WorkflowLLMProvider was removed due to production-safety issues
@@ -155,15 +157,40 @@ def _build_llm(settings: Settings) -> LLMProvider:
 
     Args:
         settings: Application settings
+        model_id: Model identifier to use for this provider
     """
-    logger.info("using_standard_llm_provider")
+    logger.info("using_standard_llm_provider", model_id=model_id)
     return StrandsLLMProvider(
         model_provider="openai",
-        model_id=settings.model_id,
+        model_id=model_id,
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         timeout_seconds=settings.llm_timeout_seconds,
     )
+
+
+def _build_cheap_llm(settings: Settings) -> LLMProvider:
+    """Build cheap LLM provider for cost-optimized routing.
+
+    Args:
+        settings: Application settings
+
+    Returns:
+        Cheap LLM provider instance
+    """
+    return _build_llm(settings, settings.cheap_model_id)
+
+
+def _build_expensive_llm(settings: Settings) -> LLMProvider:
+    """Build expensive LLM provider for high-quality generation.
+
+    Args:
+        settings: Application settings
+
+    Returns:
+        Expensive LLM provider instance
+    """
+    return _build_llm(settings, settings.expensive_model_id)
 
 
 def _build_prompt_provider(settings: Settings) -> PromptProvider | None:
@@ -207,6 +234,8 @@ def _build_prompt_test_service(
         base_url=settings.llm_base_url,
         timeout_seconds=settings.llm_timeout_seconds,
         prompt_provider=prompt_provider,
+        cheap_model_id=settings.cheap_model_id if settings.cheap_model_enabled else None,
+        expensive_model_id=settings.expensive_model_id,
     )
 
 
@@ -232,7 +261,13 @@ def _build_container(settings: Settings) -> ApplicationContainer:
     # Dependency injection pattern: build all adapters in one place.
     telemetry = _build_telemetry(settings)
     prompt_provider = _build_prompt_provider(settings)
-    llm_provider = _build_llm(settings)
+
+    # Build cost-optimized LLM providers
+    cheap_llm_provider = _build_cheap_llm(settings)
+    expensive_llm_provider = _build_expensive_llm(settings)
+    # Backwards compatibility: llm_provider points to expensive
+    llm_provider = expensive_llm_provider
+
     submission_client = _build_submission_client(settings)
 
     # Always use in-memory adapters
@@ -267,6 +302,8 @@ def _build_container(settings: Settings) -> ApplicationContainer:
         telemetry=telemetry,
         max_iterations=settings.qa_gen_max_iterations,
         prompt_provider=prompt_provider,
+        cheap_llm_provider=cheap_llm_provider,
+        expensive_llm_provider=expensive_llm_provider,
     )
 
     subscriber: PubSubSubscriptionWorker | None = None
@@ -292,6 +329,8 @@ def _build_container(settings: Settings) -> ApplicationContainer:
         prompt_provider=prompt_provider,
         prompt_test_service=prompt_test_service,
         generate_service=generate_service,
+        cheap_llm_provider=cheap_llm_provider,
+        expensive_llm_provider=expensive_llm_provider,
     )
 
 

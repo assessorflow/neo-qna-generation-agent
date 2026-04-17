@@ -89,6 +89,8 @@ class GenerateQnAService:
         telemetry: TelemetryPort | None = None,
         max_iterations: int = 3,
         prompt_provider: PromptProvider | None = None,
+        cheap_llm_provider: LLMProvider | None = None,
+        expensive_llm_provider: LLMProvider | None = None,
     ) -> None:
         self._llm_provider = llm_provider
         self._question_set_repo = question_set_repo
@@ -99,6 +101,34 @@ class GenerateQnAService:
         self._telemetry = telemetry
         self._max_iterations = max_iterations
         self._prompt_provider = prompt_provider
+        self._cheap_llm_provider = cheap_llm_provider
+        self._expensive_llm_provider = expensive_llm_provider or llm_provider
+
+    def _get_provider_for_stage(self, stage: str) -> LLMProvider:
+        """Get the appropriate LLM provider based on generation stage.
+
+        Args:
+            stage: The generation stage identifier.
+
+        Returns:
+            LLMProvider appropriate for the stage (cheap or expensive).
+        """
+        # Stages requiring high-quality generation (expensive provider)
+        expensive_stages = {"assessment_generator", "question_generation"}
+        # Stages suitable for cheaper models
+        cheap_stages = {"mcq_answer_generator", "mcq_explanation_generator"}
+
+        if stage in expensive_stages:
+            provider = self._expensive_llm_provider
+        elif stage in cheap_stages:
+            # Fall back to expensive if cheap provider not configured
+            provider = self._cheap_llm_provider or self._expensive_llm_provider
+        else:
+            # Unknown stage: fall back to legacy provider for backwards compatibility
+            provider = self._llm_provider
+
+        logger.info("using_llm_provider", stage=stage, model=provider.model_id)
+        return provider
 
     async def execute(self, command: GenerationCommand) -> GenerationReceipt:
         """Execute the generation workflow per spec."""
@@ -449,7 +479,9 @@ class GenerateQnAService:
                         context_chunks=len(context.chunks),
                     )
 
-                    batch = await self._llm_provider.generate_structured(
+                    # Use expensive provider for question generation
+                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    batch = await expensive_provider.generate_structured(
                         context=context,
                         count=request.structured_count,
                         difficulty_level=request.difficulty_level,
@@ -469,15 +501,17 @@ class GenerateQnAService:
                 # Preserve typed LLM errors for proper retry semantics
                 raise
             except Exception as error:
+                # Get the provider that was used (expensive for question generation)
+                provider_used = self._expensive_llm_provider or self._llm_provider
                 logger.error(
                     "llm_generate_structured_failed",
                     error=str(error),
                     error_type=type(error).__name__,
-                    model=self._llm_provider.model_id,
+                    model=provider_used.model_id,
                 )
                 raise GenerationError(
                     "Failed to generate structured questions",
-                    model=self._llm_provider.model_id,
+                    model=provider_used.model_id,
                 ) from error
 
         async def generate_non_structured() -> tuple[list[DomainQuestion], str | None]:
@@ -520,7 +554,9 @@ class GenerateQnAService:
                         if isinstance(compiled_prompt, str)
                         else len(str(compiled_prompt)),
                     )
-                    batch = await self._llm_provider.generate_with_prompt(
+                    # Use expensive provider for question generation
+                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    batch = await expensive_provider.generate_with_prompt(
                         prompt=compiled_prompt
                         if isinstance(compiled_prompt, str)
                         else str(compiled_prompt),
@@ -534,7 +570,9 @@ class GenerateQnAService:
                         "llm_generate_non_structured_legacy",
                         context_chunks=len(context.chunks),
                     )
-                    batch = await self._llm_provider.generate_non_structured(
+                    # Use expensive provider for question generation
+                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    batch = await expensive_provider.generate_non_structured(
                         context=context,
                         count=request.non_structured_count,
                         difficulty_level=request.difficulty_level,
@@ -554,15 +592,17 @@ class GenerateQnAService:
                 # Preserve typed LLM errors for proper retry semantics
                 raise
             except Exception as error:
+                # Get the provider that was used (expensive for question generation)
+                provider_used = self._expensive_llm_provider or self._llm_provider
                 logger.error(
                     "llm_generate_non_structured_failed",
                     error=str(error),
                     error_type=type(error).__name__,
-                    model=self._llm_provider.model_id,
+                    model=provider_used.model_id,
                 )
                 raise GenerationError(
                     "Failed to generate non-structured questions",
-                    model=self._llm_provider.model_id,
+                    model=provider_used.model_id,
                 ) from error
 
         with (
@@ -1007,9 +1047,9 @@ class GenerateQnAService:
             prompt_length=len(prompt_str),
         )
 
-        # Generate initial question stems
-        # Generate initial question stems
-        initial_result = await self._llm_provider.invoke_with_schema(
+        # Generate initial question stems using expensive provider
+        expensive_provider = self._get_provider_for_stage("assessment_generator")
+        initial_result = await expensive_provider.invoke_with_schema(
             prompt_str,
             structured_output_model=AssessmentGeneratorOutputSchema,
         )
@@ -1017,7 +1057,7 @@ class GenerateQnAService:
         if not initial_result or not initial_result.questions:
             raise GenerationError(
                 "Assessment Generator returned no questions",
-                model=self._llm_provider.model_id,
+                model=expensive_provider.model_id,
             )
 
         # Log prompt 1 completion metadata only
@@ -1077,7 +1117,9 @@ class GenerateQnAService:
             else:
                 answer_prompt_str = str(answer_compiled)
 
-            answer_result = await self._llm_provider.invoke_with_schema(
+            # Use cheap provider for MCQ answer generation
+            cheap_provider = self._get_provider_for_stage("mcq_answer_generator")
+            answer_result = await cheap_provider.invoke_with_schema(
                 answer_prompt_str,
                 structured_output_model=MCQAnswerGeneratorOutputSchema,
             )
@@ -1140,7 +1182,9 @@ class GenerateQnAService:
             else:
                 explanation_prompt_str = str(explanation_compiled)
 
-            explanation_result = await self._llm_provider.invoke_with_schema(
+            # Use cheap provider for MCQ explanation generation
+            explanation_provider = self._get_provider_for_stage("mcq_explanation_generator")
+            explanation_result = await explanation_provider.invoke_with_schema(
                 explanation_prompt_str,
                 structured_output_model=MCQExplanationOutputSchema,
             )

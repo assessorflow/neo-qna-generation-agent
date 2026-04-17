@@ -49,19 +49,37 @@ class PromptTestService:
         base_url: str | None,
         timeout_seconds: int,
         prompt_provider: PromptProvider,
+        cheap_model_id: str | None = None,
+        expensive_model_id: str | None = None,
     ) -> None:
         """Initialize the prompt test service."""
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
         self._prompt_provider = prompt_provider
 
-        # Initialize Strands OpenAIModel
-        self._model = OpenAIModel(
+        # Determine model IDs with fallback to main model_id
+        cheap_id = cheap_model_id if cheap_model_id else model_id
+        expensive_id = expensive_model_id if expensive_model_id else model_id
+
+        # Initialize Strands OpenAIModel instances for different tiers
+        self._cheap_model = OpenAIModel(
             client_args={
                 "api_key": api_key,
                 "base_url": base_url,
             },
-            model_id=model_id,
+            model_id=cheap_id,
+            params={
+                "max_tokens": 4000,
+                "temperature": 0.7,
+            },
+        )
+
+        self._expensive_model = OpenAIModel(
+            client_args={
+                "api_key": api_key,
+                "base_url": base_url,
+            },
+            model_id=expensive_id,
             params={
                 "max_tokens": 4000,
                 "temperature": 0.7,
@@ -102,7 +120,7 @@ class PromptTestService:
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
             agent = Agent(
-                model=self._model,
+                model=self._expensive_model,
                 system_prompt="You are an expert assessment generator for ELP (English Language Proficiency) assessments targeting foreign students in Singapore.",
             )
 
@@ -168,7 +186,7 @@ class PromptTestService:
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
             agent = Agent(
-                model=self._model,
+                model=self._cheap_model,
                 system_prompt="You are an expert at creating MCQ answer options with L1-targeted distractors for English Language Proficiency assessments.",
             )
 
@@ -238,7 +256,7 @@ class PromptTestService:
             prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
 
             agent = Agent(
-                model=self._model,
+                model=self._cheap_model,
                 system_prompt="You are an expert at generating detailed explanations for MCQ distractors, with expertise in L1 interference patterns for English language learners.",
             )
 
@@ -279,7 +297,11 @@ class PromptTestService:
     async def health_check(self) -> bool:
         """Check if the prompt test service is functional."""
         try:
+            # Check prompt provider
             await self._prompt_provider.get_prompt("Assessment Generator")
+            # Check both model instances are initialized
+            if self._cheap_model is None or self._expensive_model is None:
+                return False
             return True
         except Exception:
             return False

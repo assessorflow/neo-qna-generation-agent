@@ -130,6 +130,14 @@ class Settings(BaseSettings):
     )
 
     model_id: str = Field(validation_alias="OPENAI_MODEL")
+    cheap_model_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHEAP_MODEL_ID", "QNA_CHEAP_MODEL_ID"),
+    )
+    expensive_model_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("EXPENSIVE_MODEL_ID", "QNA_EXPENSIVE_MODEL_ID"),
+    )
     llm_api_key: str = Field(validation_alias="OPENAI_API_KEY")
     llm_base_url: str = Field(validation_alias="OPENAI_BASE_URL")
     # Deprecated: WorkflowLLMProvider was removed due to production-safety issues
@@ -279,9 +287,23 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _default_model_ids(self) -> Settings:
+        """Default cheap and expensive model IDs to model_id if not set."""
+        if not self.cheap_model_id or self.cheap_model_id.strip() == "":
+            self.cheap_model_id = self.model_id
+        if not self.expensive_model_id or self.expensive_model_id.strip() == "":
+            self.expensive_model_id = self.model_id
+        return self
+
     @property
     def langfuse_enabled(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    @property
+    def cheap_model_enabled(self) -> bool:
+        """Return True if a distinct cheap model is configured."""
+        return self.cheap_model_id != self.model_id
 
     @property
     def worker_ready(self) -> bool:
