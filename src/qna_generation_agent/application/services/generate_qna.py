@@ -39,6 +39,7 @@ from qna_generation_agent.application.ports.publisher import (
 from qna_generation_agent.application.ports.repository import QuestionSetRepository
 from qna_generation_agent.application.ports.submission_client import (
     CreateQuestionSetCommand,
+    IncrementIterationCommand,
     Question,
     SubmissionClient,
     WriteGeneratedQuestionsCommand,
@@ -303,20 +304,43 @@ class GenerateQnAService:
 
         # Step 5: Create or use existing QuestionSet
         # Spec: iteration comes from inbound event (Quality Validation Failed)
-        # If regenerating, the inbound iteration is the rejected one; we increment it
+        # If regenerating, call IncrementIteration to get server-side iteration
         iteration = command.iteration or 1
         if command.question_set_id and command.validation_result == "fail":
-            # Regeneration flow: use iteration from event + 1 (next iteration)
-            iteration = (command.iteration or 1) + 1
+            # Regeneration flow: increment iteration via gRPC, then generate
             question_set_id = command.question_set_id
             logger.info(
-                "using_existing_question_set",
+                "increment_iteration_request",
                 question_set_id=question_set_id,
-                iteration=iteration,
-                is_regeneration=True,
+                current_iteration=command.iteration,
             )
 
-            # Check max iterations
+            try:
+                increment_result = await self._submission_client.increment_iteration(
+                    IncrementIterationCommand(question_set_id=question_set_id)
+                )
+                iteration = increment_result.iteration_count
+                logger.info(
+                    "increment_iteration_response",
+                    question_set_id=question_set_id,
+                    new_iteration=iteration,
+                    status=increment_result.status,
+                )
+            except (StorageTransientError, StoragePermanentError):
+                # Preserve typed errors for proper retry semantics
+                raise
+            except Exception as error:
+                logger.error(
+                    "increment_iteration_failed",
+                    question_set_id=question_set_id,
+                    error=str(error),
+                )
+                raise RetrievalError(
+                    "Failed to increment iteration",
+                    question_set_id=question_set_id,
+                ) from error
+
+            # Check max iterations against server-returned value
             if iteration > self._max_iterations:
                 raise WorkflowEscalationError(
                     "Max regeneration iterations exceeded",
