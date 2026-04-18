@@ -53,6 +53,7 @@ class GrpcKnowledgeClient(KnowledgeClient):
             tls_cert_path=tls_cert_path,
         )
         self._stub: KnowledgeServiceStub | None = KnowledgeServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        self._close_lock = asyncio.Lock()
         logger.info(
             "knowledge_client_initialized",
             target=target,
@@ -168,13 +169,14 @@ class GrpcKnowledgeClient(KnowledgeClient):
 
     async def close(self) -> None:
         """Close the client connection."""
-        channel = self._channel
-        if channel is None:
-            return
-        self._channel = None
-        self._stub = None
-        await channel.close()
-        logger.info("knowledge_client_closed")
+        async with self._close_lock:
+            channel = self._channel
+            if channel is None:
+                return
+            self._channel = None
+            self._stub = None
+            await channel.close()
+            logger.info("knowledge_client_closed")
 
     async def health_check(self) -> bool:
         """Check connectivity to the Knowledge Service.

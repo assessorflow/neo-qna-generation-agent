@@ -122,42 +122,43 @@ class PubSubSubscriptionWorker:
             subscription_id=self._config.subscription_id,
         )
 
-        if self._future is not None:
-            await asyncio.to_thread(self._future.cancel)
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(self._future.result),
-                    timeout=10.0,
-                )
-            except GrpcCancelledError:
-                logger.debug(
-                    "subscription_cancelled",
-                    subscription_id=self._config.subscription_id,
-                )
-            except FutureCancelledError:
-                logger.debug(
-                    "subscription_cancelled_cleanly",
-                    subscription_id=self._config.subscription_id,
-                )
-            except NotFound:
-                logger.warning(
-                    "subscription_not_found",
-                    subscription_id=self._config.subscription_id,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "subscriber_shutdown_timeout",
-                    subscription_id=self._config.subscription_id,
-                )
+        try:
+            if self._future is not None:
+                await asyncio.to_thread(self._future.cancel)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._future.result),
+                        timeout=10.0,
+                    )
+                except GrpcCancelledError:
+                    logger.debug(
+                        "subscription_cancelled",
+                        subscription_id=self._config.subscription_id,
+                    )
+                except FutureCancelledError:
+                    logger.debug(
+                        "subscription_cancelled_cleanly",
+                        subscription_id=self._config.subscription_id,
+                    )
+                except NotFound:
+                    logger.warning(
+                        "subscription_not_found",
+                        subscription_id=self._config.subscription_id,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "subscriber_shutdown_timeout",
+                        subscription_id=self._config.subscription_id,
+                    )
+        finally:
+            if self._subscriber is not None:
+                await asyncio.to_thread(self._subscriber.close)
 
-        if self._subscriber is not None:
-            await asyncio.to_thread(self._subscriber.close)
-
-        self._started = False
-        logger.info(
-            "subscription_stopped",
-            subscription_id=self._config.subscription_id,
-        )
+            self._started = False
+            logger.info(
+                "subscription_stopped",
+                subscription_id=self._config.subscription_id,
+            )
 
     @property
     def is_started(self) -> bool:
@@ -243,7 +244,7 @@ class PubSubSubscriptionWorker:
 
     async def _extend_ack_deadline(
         self, message: object, interval: int = 30
-    ) -> asyncio.Task[None]:
+    ) -> asyncio.Task[None] | None:
         """Create a background task to extend ack deadline periodically.
 
         Args:
@@ -251,17 +252,12 @@ class PubSubSubscriptionWorker:
             interval: Seconds between deadline extensions (default 30).
 
         Returns:
-            Task that extends deadline until cancelled.
+            Task that extends deadline until cancelled, or None if extension
+            is not available for this message type.
         """
         extend_method = getattr(message, "modify_ack_deadline", None)
         if not extend_method:
-            # Fallback: no deadline extension available - use Event that never fires
-            never_event = asyncio.Event()
-
-            async def noop() -> None:
-                await never_event.wait()
-
-            return asyncio.create_task(noop())
+            return None
 
         msg_id = getattr(message, "message_id", "unknown")
 
@@ -306,11 +302,6 @@ class PubSubSubscriptionWorker:
             )
             receipt = await self._handler(envelope.to_domain_event())
 
-            # Cancel deadline extension before acking
-            extend_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await extend_task
-
             # Ack the message on success
             ack_method = getattr(message, "ack", None)
             if ack_method:
@@ -327,11 +318,6 @@ class PubSubSubscriptionWorker:
             PermanentError,
             IdempotencyConflict,
         ) as error:
-            # Cancel deadline extension
-            extend_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await extend_task
-
             # Ack permanent errors and duplicates (don't retry)
             ack_method = getattr(message, "ack", None)
             if ack_method:
@@ -342,22 +328,12 @@ class PubSubSubscriptionWorker:
                 error_type=error.__class__.__name__,
             )
         except asyncio.CancelledError:
-            # Cancel deadline extension
-            extend_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await extend_task
-
             # Re-raise cancellation for proper shutdown handling
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)
             raise
         except (TransientError, StorageTransientError, LLMTransientError) as error:
-            # Cancel deadline extension
-            extend_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await extend_task
-
             # Nack transient errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:
@@ -369,15 +345,14 @@ class PubSubSubscriptionWorker:
                 retry_after_seconds=getattr(error, "retry_after_seconds", None),
             )
         except Exception:
-            # Cancel deadline extension
-            extend_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await extend_task
-
             # Nack unexpected errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)
             logger.exception("message_failed_unexpected")
         finally:
+            if extend_task is not None:
+                extend_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await extend_task
             clear_context()

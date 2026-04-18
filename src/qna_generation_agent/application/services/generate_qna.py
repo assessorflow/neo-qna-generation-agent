@@ -14,6 +14,7 @@ from qna_generation_agent.application.dto import (
     AssessmentContext,
     GenerationCommand,
     GenerationReceipt,
+    QuestionDraft,
 )
 from qna_generation_agent.application.errors import (
     GenerationError,
@@ -35,7 +36,10 @@ from qna_generation_agent.application.ports.knowledge_client import (
     SimilaritySearchCommand,
 )
 from qna_generation_agent.application.ports.llm import LLMProvider
-from qna_generation_agent.application.ports.prompt_provider import PromptProvider
+from qna_generation_agent.application.ports.prompt_provider import (
+    Prompt,
+    PromptProvider,
+)
 from qna_generation_agent.application.ports.publisher import (
     DecisionAuditEvent,
     EventPublisher,
@@ -59,7 +63,13 @@ from qna_generation_agent.domain.entities import (
 from qna_generation_agent.domain.entities import (
     Question as DomainQuestion,
 )
-from qna_generation_agent.domain.enums import GenerationStatus, QuestionType
+from qna_generation_agent.domain.enums import (
+    DifficultyLevel,
+    GenerationStage,
+    GenerationStatus,
+    QuestionType,
+    ValidationResult,
+)
 from qna_generation_agent.domain.events import QnAGenerationCompleted
 from qna_generation_agent.domain.value_objects import AnswerId, QuestionId
 
@@ -104,7 +114,7 @@ class GenerateQnAService:
         self._cheap_llm_provider = cheap_llm_provider
         self._expensive_llm_provider = expensive_llm_provider or llm_provider
 
-    def _get_provider_for_stage(self, stage: str) -> LLMProvider:
+    def _get_provider_for_stage(self, stage: GenerationStage) -> LLMProvider:
         """Get the appropriate LLM provider based on generation stage.
 
         Args:
@@ -113,21 +123,23 @@ class GenerateQnAService:
         Returns:
             LLMProvider appropriate for the stage (cheap or expensive).
         """
-        # Stages requiring high-quality generation (expensive provider)
-        expensive_stages = {"assessment_generator", "question_generation"}
-        # Stages suitable for cheaper models
-        cheap_stages = {"mcq_answer_generator", "mcq_explanation_generator"}
+        expensive_stages = {
+            GenerationStage.ASSESSMENT_GENERATOR,
+            GenerationStage.QUESTION_GENERATION,
+        }
+        cheap_stages = {
+            GenerationStage.MCQ_ANSWER_GENERATOR,
+            GenerationStage.MCQ_EXPLANATION_GENERATOR,
+        }
 
         if stage in expensive_stages:
             provider = self._expensive_llm_provider
         elif stage in cheap_stages:
-            # Fall back to expensive if cheap provider not configured
             provider = self._cheap_llm_provider or self._expensive_llm_provider
         else:
-            # Unknown stage: fall back to legacy provider for backwards compatibility
-            provider = self._llm_provider
+            provider = self._expensive_llm_provider
 
-        logger.info("using_llm_provider", stage=stage, model=provider.model_id)
+        logger.debug("using_llm_provider", stage=stage, model=provider.model_id)
         return provider
 
     async def execute(self, command: GenerationCommand) -> GenerationReceipt:
@@ -218,8 +230,7 @@ class GenerateQnAService:
             iteration=command.iteration,
         )
 
-        # Early validation: Check max iterations for regeneration flow
-        if command.question_set_id and command.validation_result == "fail":
+        if command.question_set_id and command.validation_result == ValidationResult.FAIL:
             next_iteration = (command.iteration or 1) + 1
             if next_iteration > self._max_iterations:
                 raise WorkflowEscalationError(
@@ -283,7 +294,7 @@ class GenerateQnAService:
         subtopic_names = []
         for subtopic in subtopics:
             try:
-                logger.info(
+                logger.debug(
                     "knowledge_service_similarity_search_request",
                     subtopic=subtopic.name,
                     query=subtopic.name,
@@ -299,7 +310,7 @@ class GenerateQnAService:
                     )
                 )
                 chunk_count = len(chunks)
-                logger.info(
+                logger.debug(
                     "knowledge_service_similarity_search_response",
                     subtopic=subtopic.name,
                     chunks_retrieved=chunk_count,
@@ -331,11 +342,8 @@ class GenerateQnAService:
                 subtopics=[s.name for s in subtopics],
             )
 
-        # Step 5: Create or use existing QuestionSet
-        # Spec: iteration comes from inbound event (Quality Validation Failed)
-        # If regenerating, call IncrementIteration to get server-side iteration
         iteration = command.iteration or 1
-        if command.question_set_id and command.validation_result == "fail":
+        if command.question_set_id and command.validation_result == ValidationResult.FAIL:
             # Regeneration flow: increment iteration via gRPC, then generate
             question_set_id = command.question_set_id
             logger.info(
@@ -474,13 +482,13 @@ class GenerateQnAService:
                         correlation_id=request.correlation_id,
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "llm_generate_structured_legacy",
                         context_chunks=len(context.chunks),
                     )
 
                     # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
                     batch = await expensive_provider.generate_structured(
                         context=context,
                         count=request.structured_count,
@@ -539,7 +547,7 @@ class GenerateQnAService:
                         label=self._prompt_provider.default_label,
                     )
                     # Track prompt version for audit
-                    prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
+                    prompt_version = prompt_obj.version_string
                     input_data = AssessmentGeneratorInputSchema.from_context(
                         context=context,
                         structured_count=0,
@@ -547,7 +555,7 @@ class GenerateQnAService:
                         difficulty_level=request.difficulty_level,
                     )
                     compiled_prompt = prompt_obj.compile(**input_data.model_dump())
-                    logger.info(
+                    logger.debug(
                         "llm_generate_non_structured_prompt_compiled",
                         prompt_version=prompt_version,
                         prompt_length=len(compiled_prompt)
@@ -555,7 +563,7 @@ class GenerateQnAService:
                         else len(str(compiled_prompt)),
                     )
                     # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
                     batch = await expensive_provider.generate_with_prompt(
                         prompt=compiled_prompt
                         if isinstance(compiled_prompt, str)
@@ -566,12 +574,12 @@ class GenerateQnAService:
                         question_type="non_structured",
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "llm_generate_non_structured_legacy",
                         context_chunks=len(context.chunks),
                     )
                     # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage("question_generation")
+                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
                     batch = await expensive_provider.generate_non_structured(
                         context=context,
                         count=request.non_structured_count,
@@ -728,106 +736,121 @@ class GenerateQnAService:
             question_set_id=question_set_id,
         )
 
-        question_set.mark_completed()
-        await self._question_set_repo.save(question_set)
-        logger.info(
-            "question_set_marked_completed",
-            question_set_id=question_set_id,
-            assessment_id=question_set.assessment_id,
-        )
-
-        # Step 8: Publish completion + audit events (BEST-EFFORT ONLY)
-        # These must not affect idempotency - duplicates here are acceptable
-        logger.info(
-            "generation_receipt_created",
-            question_set_id=receipt.question_set_id,
-            question_count=receipt.question_count,
-            structured=receipt.structured_generated,
-            non_structured=receipt.non_structured_generated,
-            status=receipt.status,
-            trace_id=trace_id,
-        )
-
-        # Publish completion event per spec 5.11
-        completion_event = QnAGenerationCompleted(
-            event_id=f"evt_{uuid.uuid4().hex[:12]}",
-            workflow_id=request.workflow_id,
-            assessment_id=request.assessment_id,
-            question_set_id=question_set.id,
-            structured_generated=structured_generated,
-            non_structured_generated=non_structured_generated,
-            iteration=question_set.iteration,
-            correlation_id=request.correlation_id,
-            trace_id=trace_id,
-        )
-        logger.info(
-            "publishing_completion_event",
-            event_id=completion_event.event_id,
-            workflow_id=completion_event.workflow_id,
-            question_set_id=completion_event.question_set_id,
-        )
-        await self._event_publisher.publish_completion(completion_event)
-        logger.info(
-            "completion_event_published",
-            event_id=completion_event.event_id,
-        )
-
-        # Publish audit events (best-effort)
-        # Determine prompt version used (prefer structured path version)
-        actual_prompt_version = (
-            structured_prompt_version
-            or non_structured_prompt_version
-            or "qa-gen/unknown@v0"
-        )
-
+        # ------------------------------------------------------------------
+        # EVERYTHING BELOW IS BEST-EFFORT ONLY.
+        # Failures here MUST NOT propagate out of _generate(), otherwise the
+        # caller will mark idempotency as FAILED even though the submission
+        # service already persisted the generated questions.
+        # ------------------------------------------------------------------
         try:
-            await self._event_publisher.publish_decision_audit(
-                DecisionAuditEvent(
-                    workflow_id=command.workflow_id,
-                    input_summary={
-                        "question_set_id": question_set.id,
-                        "iteration": question_set.iteration,
-                    },
-                    output_summary={
-                        "result": "pass",  # Hardcoded - validation happens in evaluator
-                        "issues_found": 0,  # Hardcoded - no self-detected issues
-                    },
-                    reasoning_steps=[
-                        f"Retrieved {len(all_chunks)} chunks across {len(subtopics)} subtopics",
-                        f"Generated {structured_generated} structured and {non_structured_generated} non-structured questions",
-                        f"Used prompt version: {actual_prompt_version}",
-                    ],
-                    confidence_score=0.88,  # HARDCODED - would need LLM to return this
-                    prompt_version=actual_prompt_version,
-                    model_id=self._llm_provider.model_id,
-                    grounding_sources=all_chunk_ids[:20]
-                    if all_chunk_ids
-                    else [],  # Dynamic - actual chunk IDs
-                )
+            question_set.mark_completed()
+            await self._question_set_repo.save(question_set)
+            logger.info(
+                "question_set_marked_completed",
+                question_set_id=question_set_id,
+                assessment_id=question_set.assessment_id,
             )
-        except Exception as e:
-            # Audit events are best-effort; log but don't fail
-            logger.warning("decision_audit_publish_failed", error=str(e))
 
-        try:
-            # Estimate tokens (rough approximation)
-            prompt_tokens = len(all_chunks) * 200  # Rough estimate
-            completion_tokens = (structured_generated + non_structured_generated) * 100
-            await self._event_publisher.publish_token_usage(
-                TokenUsageEvent(
-                    workflow_id=command.workflow_id,
-                    model_id=self._llm_provider.model_id,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                    estimated_cost_usd=(prompt_tokens + completion_tokens)
-                    * 0.000002,  # Rough estimate for gpt-4o-mini
-                    prompt_version=actual_prompt_version,
-                )
+            # Step 8: Publish completion + audit events
+            # Duplicates here are acceptable
+            logger.info(
+                "generation_receipt_created",
+                question_set_id=receipt.question_set_id,
+                question_count=receipt.question_count,
+                structured=receipt.structured_generated,
+                non_structured=receipt.non_structured_generated,
+                status=receipt.status,
+                trace_id=trace_id,
             )
-        except Exception as e:
-            # Audit events are best-effort; log but don't fail
-            logger.warning("token_usage_publish_failed", error=str(e))
+
+            # Publish completion event per spec 5.11
+            completion_event = QnAGenerationCompleted(
+                event_id=f"evt_{uuid.uuid4().hex[:12]}",
+                workflow_id=request.workflow_id,
+                assessment_id=request.assessment_id,
+                question_set_id=question_set.id,
+                structured_generated=structured_generated,
+                non_structured_generated=non_structured_generated,
+                iteration=question_set.iteration,
+                correlation_id=request.correlation_id,
+                trace_id=trace_id,
+            )
+            logger.info(
+                "publishing_completion_event",
+                event_id=completion_event.event_id,
+                workflow_id=completion_event.workflow_id,
+                question_set_id=completion_event.question_set_id,
+            )
+            await self._event_publisher.publish_completion(completion_event)
+            logger.info(
+                "completion_event_published",
+                event_id=completion_event.event_id,
+            )
+
+            # Publish audit events (best-effort)
+            # Determine prompt version used (prefer structured path version)
+            actual_prompt_version = (
+                structured_prompt_version
+                or non_structured_prompt_version
+                or "qa-gen/unknown@v0"
+            )
+
+            try:
+                await self._event_publisher.publish_decision_audit(
+                    DecisionAuditEvent(
+                        workflow_id=command.workflow_id,
+                        input_summary={
+                            "question_set_id": question_set.id,
+                            "iteration": question_set.iteration,
+                        },
+                        output_summary={
+                            "result": "pass",  # Hardcoded - validation happens in evaluator
+                            "issues_found": 0,  # Hardcoded - no self-detected issues
+                        },
+                        reasoning_steps=[
+                            f"Retrieved {len(all_chunks)} chunks across {len(subtopics)} subtopics",
+                            f"Generated {structured_generated} structured and {non_structured_generated} non-structured questions",
+                            f"Used prompt version: {actual_prompt_version}",
+                        ],
+                        confidence_score=0.88,  # HARDCODED - would need LLM to return this
+                        prompt_version=actual_prompt_version,
+                        model_id=self._llm_provider.model_id,
+                        grounding_sources=all_chunk_ids[:20]
+                        if all_chunk_ids
+                        else [],  # Dynamic - actual chunk IDs
+                    )
+                )
+            except Exception as e:
+                # Audit events are best-effort; log but don't fail
+                logger.warning("decision_audit_publish_failed", error=str(e))
+
+            try:
+                # Estimate tokens (rough approximation)
+                prompt_tokens = len(all_chunks) * 200  # Rough estimate
+                completion_tokens = (structured_generated + non_structured_generated) * 100
+                await self._event_publisher.publish_token_usage(
+                    TokenUsageEvent(
+                        workflow_id=command.workflow_id,
+                        model_id=self._llm_provider.model_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=prompt_tokens + completion_tokens,
+                        estimated_cost_usd=(prompt_tokens + completion_tokens)
+                        * 0.000002,  # Rough estimate for gpt-4o-mini
+                        prompt_version=actual_prompt_version,
+                    )
+                )
+            except Exception as e:
+                # Audit events are best-effort; log but don't fail
+                logger.warning("token_usage_publish_failed", error=str(e))
+        except Exception as error:
+            logger.warning(
+                "post_completion_best_effort_failed",
+                request_id=command.request_id,
+                question_set_id=question_set_id,
+                error=str(error),
+                error_type=type(error).__name__,
+            )
 
         return receipt
 
@@ -845,8 +868,8 @@ class GenerateQnAService:
         """
         is_regeneration = (
             command.question_set_id is not None
-            and command.validation_result == "fail"
             and command.question_set_id != ""
+            and command.validation_result == ValidationResult.FAIL
         )
 
         if is_regeneration:
@@ -872,17 +895,6 @@ class GenerateQnAService:
                     non_structured_count=non_structured_count,
                     difficulty_level=difficulty_level,
                 )
-            except StoragePermanentError as e:
-                # GetAssessmentConfig not implemented yet - fall back to trigger data
-                # This preserves backward compatibility during proto rollout
-                logger.warning(
-                    "regeneration_config_fallback_to_trigger",
-                    assessment_id=command.assessment_id,
-                    error=str(e),
-                )
-                structured_count = command.structured_count or 0
-                non_structured_count = command.non_structured_count or 0
-                difficulty_level = command.difficulty_level
             except StorageTransientError:
                 raise  # Retryable errors should be retried
         else:
@@ -904,7 +916,7 @@ class GenerateQnAService:
         self,
         topics: list[Any],
         total_count: int,
-        difficulty_level: str | None,
+        difficulty_level: DifficultyLevel | None,
     ) -> list[Subtopic]:
         """Select subtopics based on question count and difficulty per spec."""
         # Flatten all subtopics recursively
@@ -934,11 +946,7 @@ class GenerateQnAService:
         selected_count = min(total_count, len(all_subtopics))
         return all_subtopics[:selected_count]
 
-    def _to_domain_question(self, draft: object) -> DomainQuestion:
-        from qna_generation_agent.application.dto import QuestionDraft
-
-        if not isinstance(draft, QuestionDraft):
-            raise TypeError("Question draft must be a QuestionDraft instance")
+    def _to_domain_question(self, draft: QuestionDraft) -> DomainQuestion:
 
         return DomainQuestion(
             id=QuestionId.generate(),
@@ -960,7 +968,7 @@ class GenerateQnAService:
         *,
         context: AssessmentContext,
         count: int,
-        difficulty_level: str | None,
+        difficulty_level: DifficultyLevel | None,
         correlation_id: str,
     ) -> tuple[list[DomainQuestion], str]:
         """Generate structured questions using 3-prompt workflow.
@@ -994,7 +1002,7 @@ class GenerateQnAService:
         )
 
         # Debug: Log prompt metadata only
-        logger.info(
+        logger.debug(
             "prompt_1_metadata",
             prompt_name=prompt_obj.name,
             prompt_version=prompt_obj.version,
@@ -1010,7 +1018,7 @@ class GenerateQnAService:
 
         # Log prompt variables metadata only
         input_dump = input_data.model_dump()
-        logger.info(
+        logger.debug(
             "prompt_1_variables",
             structured_count=input_dump["structured_count"],
             non_structured_count=input_dump["non_structured_count"],
@@ -1022,25 +1030,16 @@ class GenerateQnAService:
         compiled = prompt_obj.compile(**input_dump)
 
         # Log compilation metadata only
-        logger.info(
+        logger.debug(
             "prompt_1_compiled",
             compiled_type=type(compiled).__name__,
             prompt_name=prompt_obj.name,
             prompt_version=prompt_obj.version,
         )
 
-        # Handle both text prompts (str) and chat prompts (list of dicts)
-        if isinstance(compiled, str):
-            prompt_str = compiled
-        elif isinstance(compiled, list) and len(compiled) > 0:
-            # Chat format - join all message contents
-            prompt_str = "\n\n".join(
-                msg.get("content", "") for msg in compiled if isinstance(msg, dict)
-            )
-        else:
-            prompt_str = str(compiled)
+        prompt_str = Prompt.compiled_to_string(compiled)
 
-        logger.info(
+        logger.debug(
             "prompt_1_assessment_generator_compiled",
             prompt_name=prompt_obj.name,
             prompt_version=prompt_obj.version,
@@ -1048,7 +1047,7 @@ class GenerateQnAService:
         )
 
         # Generate initial question stems using expensive provider
-        expensive_provider = self._get_provider_for_stage("assessment_generator")
+        expensive_provider = self._get_provider_for_stage(GenerationStage.ASSESSMENT_GENERATOR)
         initial_result = await expensive_provider.invoke_with_schema(
             prompt_str,
             structured_output_model=AssessmentGeneratorOutputSchema,
@@ -1074,14 +1073,14 @@ class GenerateQnAService:
             if question.question_type != "structured":
                 continue
 
-            logger.info(
+            logger.debug(
                 "processing_structured_question",
                 question_index=idx,
                 question_id=question.question_id,
             )
 
             # Step 2: MCQ Answer Generator
-            logger.info("prompt_2_mcq_answer_generator_started", question_index=idx)
+            logger.debug("prompt_2_mcq_answer_generator_started", question_index=idx)
 
             # Validator ensures question_text/content is set, but mypy doesn't know
             question_stem = question.question_text or question.content
@@ -1103,22 +1102,9 @@ class GenerateQnAService:
                 l1_background="Mixed",  # Could be configured
             )
             answer_compiled = answer_prompt_obj.compile(**answer_input.model_dump())
+            answer_prompt_str = Prompt.compiled_to_string(answer_compiled)
 
-            # Handle both text prompts (str) and chat prompts (list of dicts)
-            if isinstance(answer_compiled, str):
-                answer_prompt_str = answer_compiled
-            elif isinstance(answer_compiled, list) and len(answer_compiled) > 0:
-                # Chat format - join all message contents
-                answer_prompt_str = "\n\n".join(
-                    msg.get("content", "")
-                    for msg in answer_compiled
-                    if isinstance(msg, dict)
-                )
-            else:
-                answer_prompt_str = str(answer_compiled)
-
-            # Use cheap provider for MCQ answer generation
-            cheap_provider = self._get_provider_for_stage("mcq_answer_generator")
+            cheap_provider = self._get_provider_for_stage(GenerationStage.MCQ_ANSWER_GENERATOR)
             answer_result = await cheap_provider.invoke_with_schema(
                 answer_prompt_str,
                 structured_output_model=MCQAnswerGeneratorOutputSchema,
@@ -1133,7 +1119,7 @@ class GenerateQnAService:
                 continue
 
             # Log prompt 2 completion metadata only
-            logger.info(
+            logger.debug(
                 "prompt_2_mcq_answer_generator_complete",
                 question_index=idx,
                 correct_letter=answer_result.correct_answer.option_letter,
@@ -1141,7 +1127,7 @@ class GenerateQnAService:
             )
 
             # Step 3: MCQ Explanation Generator
-            logger.info(
+            logger.debug(
                 "prompt_3_mcq_explanation_generator_started", question_index=idx
             )
 
@@ -1166,24 +1152,11 @@ class GenerateQnAService:
             explanation_compiled = explanation_prompt_obj.compile(
                 **explanation_input.model_dump()
             )
+            explanation_prompt_str = Prompt.compiled_to_string(explanation_compiled)
 
-            # Handle both text prompts (str) and chat prompts (list of dicts)
-            if isinstance(explanation_compiled, str):
-                explanation_prompt_str = explanation_compiled
-            elif (
-                isinstance(explanation_compiled, list) and len(explanation_compiled) > 0
-            ):
-                # Chat format - join all message contents
-                explanation_prompt_str = "\n\n".join(
-                    msg.get("content", "")
-                    for msg in explanation_compiled
-                    if isinstance(msg, dict)
-                )
-            else:
-                explanation_prompt_str = str(explanation_compiled)
-
-            # Use cheap provider for MCQ explanation generation
-            explanation_provider = self._get_provider_for_stage("mcq_explanation_generator")
+            explanation_provider = self._get_provider_for_stage(
+                GenerationStage.MCQ_EXPLANATION_GENERATOR
+            )
             explanation_result = await explanation_provider.invoke_with_schema(
                 explanation_prompt_str,
                 structured_output_model=MCQExplanationOutputSchema,
@@ -1191,7 +1164,7 @@ class GenerateQnAService:
 
             if explanation_result:
                 # Log prompt 3 completion metadata only
-                logger.info(
+                logger.debug(
                     "prompt_3_mcq_explanation_generator_complete",
                     question_index=idx,
                     cefr_level=explanation_result.cefr_level,
@@ -1246,7 +1219,7 @@ class GenerateQnAService:
 
             # Create final domain question
             topic_value = question.metadata.get("topic", "")
-            topic_id_str = str(topic_value) if topic_value is not None else None
+            topic_id_str = str(topic_value) if topic_value else None
 
             # Build metadata dict with string values only
             metadata_dict: dict[str, str] = {

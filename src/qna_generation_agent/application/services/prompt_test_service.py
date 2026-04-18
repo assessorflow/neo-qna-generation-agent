@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -14,6 +15,7 @@ from qna_generation_agent.infrastructure.llm.prompt_builder import (
     AssessmentGeneratorOutputSchema,
     MCQAnswerGeneratorOutputSchema,
     MCQExplanationOutputSchema,
+    format_chunks_for_prompt,
 )
 
 logger = get_logger(__name__)
@@ -97,6 +99,7 @@ class PromptTestService:
     ) -> PromptTestResult:
         """Test the Assessment Generator prompt with structured output."""
         start_time = time.monotonic()
+        prompt_version = "unknown"
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
@@ -104,9 +107,7 @@ class PromptTestService:
                 label=self._prompt_provider.default_label,
             )
 
-            chunks_formatted = "\n\n".join(
-                f"[Chunk {i}] {chunk}" for i, chunk in enumerate(chunks, start=1)
-            )
+            chunks_formatted = format_chunks_for_prompt(chunks)
 
             compiled = prompt_obj.compile(
                 structured_count=structured_count,
@@ -117,17 +118,18 @@ class PromptTestService:
             )
 
             prompt_str = str(compiled)
-            prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
+            prompt_version = prompt_obj.version_string
 
             agent = Agent(
                 model=self._expensive_model,
                 system_prompt="You are an expert assessment generator for ELP (English Language Proficiency) assessments targeting foreign students in Singapore.",
             )
 
-            result = await agent.invoke_async(
-                prompt_str,
-                structured_output_model=AssessmentGeneratorOutputSchema,
-            )
+            async with asyncio.timeout(self._timeout_seconds):
+                result = await agent.invoke_async(
+                    prompt_str,
+                    structured_output_model=AssessmentGeneratorOutputSchema,
+                )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -144,6 +146,19 @@ class PromptTestService:
                 raw_output=None,
             )
 
+        except TimeoutError:
+            execution_time_ms = int((time.monotonic() - start_time) * 1000)
+            logger.warning(
+                "assessment_generator_test_timed_out",
+                timeout_seconds=self._timeout_seconds,
+                prompt_version=prompt_version,
+            )
+            return PromptTestResult(
+                result=None,
+                prompt_version=prompt_version,
+                execution_time_ms=execution_time_ms,
+                error=f"Prompt execution timed out after {self._timeout_seconds}s",
+            )
         except Exception as error:
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
             logger.error(
@@ -153,7 +168,7 @@ class PromptTestService:
             )
             return PromptTestResult(
                 result=None,
-                prompt_version="unknown",
+                prompt_version=prompt_version,
                 execution_time_ms=execution_time_ms,
                 error=str(error),
             )
@@ -168,6 +183,7 @@ class PromptTestService:
     ) -> PromptTestResult:
         """Test the MCQ Answer Generator prompt with structured output."""
         start_time = time.monotonic()
+        prompt_version = "unknown"
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
@@ -183,17 +199,18 @@ class PromptTestService:
             )
 
             prompt_str = str(compiled)
-            prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
+            prompt_version = prompt_obj.version_string
 
             agent = Agent(
                 model=self._cheap_model,
                 system_prompt="You are an expert at creating MCQ answer options with L1-targeted distractors for English Language Proficiency assessments.",
             )
 
-            result = await agent.invoke_async(
-                prompt_str,
-                structured_output_model=MCQAnswerGeneratorOutputSchema,
-            )
+            async with asyncio.timeout(self._timeout_seconds):
+                result = await agent.invoke_async(
+                    prompt_str,
+                    structured_output_model=MCQAnswerGeneratorOutputSchema,
+                )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -210,6 +227,19 @@ class PromptTestService:
                 raw_output=None,
             )
 
+        except TimeoutError:
+            execution_time_ms = int((time.monotonic() - start_time) * 1000)
+            logger.warning(
+                "mcq_answer_generator_test_timed_out",
+                timeout_seconds=self._timeout_seconds,
+                prompt_version=prompt_version,
+            )
+            return PromptTestResult(
+                result=None,
+                prompt_version=prompt_version,
+                execution_time_ms=execution_time_ms,
+                error=f"Prompt execution timed out after {self._timeout_seconds}s",
+            )
         except Exception as error:
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
             logger.error(
@@ -219,7 +249,7 @@ class PromptTestService:
             )
             return PromptTestResult(
                 result=None,
-                prompt_version="unknown",
+                prompt_version=prompt_version,
                 execution_time_ms=execution_time_ms,
                 error=str(error),
             )
@@ -234,6 +264,7 @@ class PromptTestService:
     ) -> PromptTestResult:
         """Test the MCQ Explanation Generator prompt with structured output."""
         start_time = time.monotonic()
+        prompt_version = "unknown"
 
         try:
             prompt_obj = await self._prompt_provider.get_prompt(
@@ -253,17 +284,18 @@ class PromptTestService:
             )
 
             prompt_str = str(compiled)
-            prompt_version = f"{prompt_obj.name}@v{prompt_obj.version}"
+            prompt_version = prompt_obj.version_string
 
             agent = Agent(
                 model=self._cheap_model,
                 system_prompt="You are an expert at generating detailed explanations for MCQ distractors, with expertise in L1 interference patterns for English language learners.",
             )
 
-            result = await agent.invoke_async(
-                prompt_str,
-                structured_output_model=MCQExplanationOutputSchema,
-            )
+            async with asyncio.timeout(self._timeout_seconds):
+                result = await agent.invoke_async(
+                    prompt_str,
+                    structured_output_model=MCQExplanationOutputSchema,
+                )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -280,6 +312,19 @@ class PromptTestService:
                 raw_output=None,
             )
 
+        except TimeoutError:
+            execution_time_ms = int((time.monotonic() - start_time) * 1000)
+            logger.warning(
+                "mcq_explanation_generator_test_timed_out",
+                timeout_seconds=self._timeout_seconds,
+                prompt_version=prompt_version,
+            )
+            return PromptTestResult(
+                result=None,
+                prompt_version=prompt_version,
+                execution_time_ms=execution_time_ms,
+                error=f"Prompt execution timed out after {self._timeout_seconds}s",
+            )
         except Exception as error:
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
             logger.error(
@@ -289,7 +334,7 @@ class PromptTestService:
             )
             return PromptTestResult(
                 result=None,
-                prompt_version="unknown",
+                prompt_version=prompt_version,
                 execution_time_ms=execution_time_ms,
                 error=str(error),
             )
@@ -299,9 +344,6 @@ class PromptTestService:
         try:
             # Check prompt provider
             await self._prompt_provider.get_prompt("Assessment Generator")
-            # Check both model instances are initialized
-            if self._cheap_model is None or self._expensive_model is None:
-                return False
             return True
         except Exception:
             return False

@@ -60,6 +60,7 @@ class GrpcSubmissionClient(SubmissionClient):
             tls_cert_path=tls_cert_path,
         )
         self._stub: SubmissionServiceStub | None = SubmissionServiceStub(self._channel)  # type: ignore[no-untyped-call]
+        self._close_lock = asyncio.Lock()
         logger.info(
             "submission_client_initialized",
             target=target,
@@ -250,13 +251,14 @@ class GrpcSubmissionClient(SubmissionClient):
 
     async def close(self) -> None:
         """Close the client connection."""
-        channel = self._channel
-        if channel is None:
-            return
-        self._channel = None
-        self._stub = None
-        await channel.close()
-        logger.info("submission_client_closed")
+        async with self._close_lock:
+            channel = self._channel
+            if channel is None:
+                return
+            self._channel = None
+            self._stub = None
+            await channel.close()
+            logger.info("submission_client_closed")
 
     async def health_check(self) -> bool:
         """Check connectivity to the Submission Service.

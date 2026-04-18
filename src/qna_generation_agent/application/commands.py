@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from qna_generation_agent.application.dto import GenerationCommand, GenerationReceipt
 from qna_generation_agent.application.services.generate_qna import GenerateQnAService
-from qna_generation_agent.domain.enums import DifficultyLevel, Purpose
+from qna_generation_agent.domain.enums import DifficultyLevel, Purpose, ValidationResult
 from qna_generation_agent.domain.events import QnAGenerationTriggered
 
 
@@ -24,6 +24,16 @@ def _parse_purpose(value: str | None) -> Purpose | None:
         return None
     try:
         return Purpose(value.lower())
+    except ValueError:
+        return None
+
+
+def _parse_validation_result(value: str | None) -> ValidationResult | None:
+    """Parse validation result string to enum."""
+    if value is None:
+        return None
+    try:
+        return ValidationResult(value.lower())
     except ValueError:
         return None
 
@@ -58,7 +68,7 @@ class HandleGenerationTrigger:
             trace_id=event.trace_id,
             assessment_id=event.assessment_id,
             question_set_id=event.question_set_id,
-            validation_result=event.validation_result,
+            validation_result=_parse_validation_result(event.validation_result),
             iteration=event.iteration,
             structured_count=event.structured_count,
             non_structured_count=event.non_structured_count,
