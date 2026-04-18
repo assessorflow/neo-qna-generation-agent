@@ -63,7 +63,10 @@ packages = ["qna_generation_agent"]
 mypy_path = ["src"]
 strict = true
 warn_unused_configs = true
-exclude = ["src/qna_generation_agent/infrastructure/grpc/stubs"]
+exclude = [
+    "src/qna_generation_agent/infrastructure/grpc/stubs",
+    "tests",
+]
 
 [[tool.mypy.overrides]]
 module = [

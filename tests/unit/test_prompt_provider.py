@@ -189,3 +189,54 @@ def test_prompt_compile_converts_non_string_values() -> None:
 
     result = prompt.compile(count=42, active=True)
     assert result == "Count: 42, Active: True"
+
+
+@pytest.mark.unit
+def test_prompt_version_string_property() -> None:
+    """version_string returns formatted name@version."""
+    prompt = Prompt(
+        name="Assessment Generator",
+        version=5,
+        prompt_text="Generate questions",
+    )
+
+    assert prompt.version_string == "Assessment Generator@v5"
+
+
+@pytest.mark.unit
+def test_prompt_compiled_to_string_with_text() -> None:
+    """compiled_to_string returns string as-is for text prompts."""
+    compiled = "Hello World!"
+    result = Prompt.compiled_to_string(compiled)
+    assert result == "Hello World!"
+
+
+@pytest.mark.unit
+def test_prompt_compiled_to_string_with_chat_messages() -> None:
+    """compiled_to_string joins chat message contents with newlines."""
+    compiled = [
+        {"role": "system", "content": "You are an expert."},
+        {"role": "user", "content": "Generate questions."},
+    ]
+    result = Prompt.compiled_to_string(compiled)
+    assert result == "You are an expert.\n\nGenerate questions."
+
+
+@pytest.mark.unit
+def test_prompt_compiled_to_string_with_empty_list() -> None:
+    """compiled_to_string handles empty list by returning str()."""
+    compiled: list[dict[str, str]] = []
+    result = Prompt.compiled_to_string(compiled)
+    assert result == "[]"
+
+
+@pytest.mark.unit
+def test_prompt_compiled_to_string_with_invalid_items() -> None:
+    """compiled_to_string skips non-dict items in chat list."""
+    compiled = [
+        {"role": "system", "content": "System message."},
+        "invalid_item",
+        {"role": "user", "content": "User message."},
+    ]
+    result = Prompt.compiled_to_string(compiled)
+    assert result == "System message.\n\nUser message."

@@ -168,6 +168,67 @@ class TestAssessmentGeneratorOutputSchema:
         with pytest.raises(ValidationError):
             AssessmentGeneratorOutputSchema(questions=[])
 
+    def test_questions_validator_handles_single_dict(self) -> None:
+        """Test that a single question dict is converted to a list."""
+        single_question = {
+            "question_id": "q-001",
+            "question_type": "structured",
+            "content": "What is the answer?",
+            "structured_answer": "A",
+            "metadata": {
+                "options": {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"},
+                "source_chunk_ids": ["chunk-001"],
+                "difficulty": "medium",
+                "topic": "Grammar",
+            },
+        }
+        output = AssessmentGeneratorOutputSchema(questions=single_question)  # type: ignore
+        assert len(output.questions) == 1
+        assert output.questions[0].question_id == "q-001"
+
+    def test_questions_validator_handles_dict_with_numeric_keys(self) -> None:
+        """Test that a dict with numeric keys is converted to a list."""
+        questions_dict = {
+            "0": {
+                "question_id": "q-001",
+                "question_type": "structured",
+                "content": "Question 1?",
+                "structured_answer": "A",
+                "metadata": {
+                    "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+                    "source_chunk_ids": ["chunk-001"],
+                    "difficulty": "medium",
+                    "topic": "Grammar",
+                },
+            },
+            "1": {
+                "question_id": "q-002",
+                "question_type": "structured",
+                "content": "Question 2?",
+                "structured_answer": "B",
+                "metadata": {
+                    "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+                    "source_chunk_ids": ["chunk-002"],
+                    "difficulty": "easy",
+                    "topic": "Vocabulary",
+                },
+            },
+        }
+        output = AssessmentGeneratorOutputSchema(questions=questions_dict)  # type: ignore
+        assert len(output.questions) == 2
+        assert output.questions[0].question_id == "q-001"
+        assert output.questions[1].question_id == "q-002"
+
+    def test_questions_validator_handles_none(self) -> None:
+        """Test that None value raises validation error (empty list after validation)."""
+        with pytest.raises(ValidationError):
+            AssessmentGeneratorOutputSchema(questions=None)  # type: ignore
+
+    def test_questions_validator_handles_invalid_type(self) -> None:
+        """Test that non-list, non-dict values raise validation error."""
+        with pytest.raises(ValidationError):
+            AssessmentGeneratorOutputSchema(questions="invalid string")  # type: ignore
+
 
 @pytest.mark.unit
 class TestAssessmentGeneratorInputSchema:

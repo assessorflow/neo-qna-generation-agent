@@ -257,8 +257,14 @@ Environment variables (loaded from `.env`):
 - `ENABLE_TEST_ROUTES` — Enable `/test/*` prompt testing endpoints (default: `false`)
 - `PROMPT_LABEL` — Default Langfuse prompt label (default: `production`)
 - `QA_GEN_MAX_ITERATIONS` — Max regeneration iterations (default: `3`)
+- `QA_GEN_MAX_RETRIES` — Max retries per generation attempt (default: `3`)
 - `QA_GEN_TIMEOUT_MS` — Generation timeout in milliseconds (default: `30000`)
 - `LLM_TIMEOUT_SECONDS` — LLM call timeout (default: `120`)
+- `ENVIRONMENT` — Runtime environment: `local`, `dev`, `staging`, `prod` (default: `local`)
+- `SUBMISSION_ASSESSMENT_CONFIG_ENABLED` — Fetch assessment config from Submission Service (default: `true`)
+- `LLM_WORKFLOW_MODE` — Deprecated, kept for backwards compatibility (default: `false`)
+
+> **Note:** All environment variables also support a `QNA_` prefix (e.g., `QNA_OPENAI_API_KEY`). The prefixed variant takes precedence if both are set.
 
 ### Security Settings
 - `CORS_ALLOWED_ORIGINS` — Comma-separated allowed origins (default: empty = no restrictions in dev)
@@ -582,7 +588,7 @@ Process hangs on SIGTERM / keeps restarting
 
 | Metric | Status |
 |--------|--------|
-| Test Coverage | ~79% (271 tests passing) |
+| Test Coverage | ~82% (370 tests passing) |
 | Type Safety | Strict mypy (no issues) |
 | Linting | Ruff passing |
 | Architecture | Hexagonal + Clean Architecture |
@@ -590,7 +596,7 @@ Process hangs on SIGTERM / keeps restarting
 
 ### Code Quality Highlights
 
-- **All 271 tests pass** with coverage near 80% requirement
+- **All 370 tests pass** with coverage near 80% requirement
 - **Strict mypy enabled** with `disallow_untyped_defs` - no type errors
 - **Modern Python 3.13+** patterns: `StrEnum`, `T: BaseModel` syntax, improved asyncio
 - **No legacy imports**: `import json` replaced with `orjson` throughout

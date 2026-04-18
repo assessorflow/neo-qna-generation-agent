@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 
 from qna_generation_agent.application.dto import GenerationReceipt
@@ -43,24 +44,6 @@ class FakeMessage:
 
     def nack(self) -> None:
         self._nacked = True
-
-
-class FakeStreamingPullFuture:
-    """Fake StreamingPullFuture for testing."""
-
-    def __init__(self) -> None:
-        self._cancelled = False
-        self._result_called = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def result(self) -> None:
-        self._result_called = True
-        if self._cancelled:
-            from concurrent.futures import CancelledError as FutureCancelledError
-
-            raise FutureCancelledError()
 
 
 @pytest.fixture
@@ -133,7 +116,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(return_value=receipt)
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -182,7 +164,6 @@ class TestPubSubSubscriptionWorker:
         )
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -233,8 +214,13 @@ class TestPubSubSubscriptionWorker:
 
         # Mock run_coroutine_threadsafe to raise RuntimeError
         original_run = asyncio.run_coroutine_threadsafe
+        captured_coro: asyncio.Coroutine[Any, Any, Any] | None = None
 
-        def mock_run_coroutine(*args: Any, **kwargs: Any) -> Any:
+        def mock_run_coroutine(
+            coro: asyncio.Coroutine[Any, Any, Any], *args: Any, **kwargs: Any
+        ) -> Any:
+            nonlocal captured_coro
+            captured_coro = coro
             raise RuntimeError("Event loop is closed")
 
         asyncio.run_coroutine_threadsafe = mock_run_coroutine  # type: ignore
@@ -243,6 +229,9 @@ class TestPubSubSubscriptionWorker:
             worker._callback(message)
         finally:
             asyncio.run_coroutine_threadsafe = original_run  # type: ignore
+            # Close the unawaited coroutine to suppress RuntimeWarning
+            if captured_coro is not None:
+                captured_coro.close()
 
         # Message should be nacked when scheduling fails
         assert message._nacked
@@ -361,7 +350,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=RuntimeError("Unexpected failure"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -382,7 +370,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=asyncio.CancelledError())
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -442,7 +429,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=DomainValidationError("Domain error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -463,7 +449,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=AppValidationError("App error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -484,7 +469,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=LLMTransientError("LLM transient error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",
@@ -507,7 +491,6 @@ class TestPubSubSubscriptionWorker:
         )
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        import orjson
 
         message = FakeMessage(
             message_id="msg_123",

@@ -323,11 +323,6 @@ def test_build_container_uses_in_memory_adapters(
         "_build_knowledge_client",
         lambda settings: FakeKnowledgeClient(),
     )
-    monkeypatch.setattr(
-        bootstrap_module,
-        "_build_submission_client",
-        lambda settings: FakeSubmissionClient(),
-    )
 
     container = bootstrap_module._build_container(_settings())
 

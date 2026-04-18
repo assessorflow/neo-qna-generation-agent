@@ -34,16 +34,14 @@ class TestConfigureOpenapi:
     @pytest.mark.unit
     def test_binds_openapi_handler(self) -> None:
         """Test that OpenAPI handler is bound to app."""
-        # Create a proper mock that won't trigger the "started" check
         app = MagicMock()
         app.started = False
         app.router = MagicMock()
 
         _configure_openapi(app)
 
-        # Verify bind_app was called on the app
-        # The OpenAPI handler's bind_app method should be invoked
-        assert app.router is not None
+        # bind_app calls methods on app.router, so router must have been accessed
+        assert app.router.get.called
 
     @pytest.mark.unit
     def test_configures_favicon_route(self) -> None:
@@ -59,4 +57,4 @@ class TestConfigureOpenapi:
         route_calls = [
             call for call in app.router.method_calls if "favicon" in str(call)
         ]
-        assert len(route_calls) > 0 or app.router.get.called
+        assert len(route_calls) > 0
