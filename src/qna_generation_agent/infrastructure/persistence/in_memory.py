@@ -106,6 +106,7 @@ class InMemoryQuestionSetRepository(QuestionSetRepository):
 
     def __init__(self) -> None:
         self._question_sets: dict[str, QuestionSet] = {}
+        self._lock = asyncio.Lock()
 
     async def next_iteration(self, *, assessment_id: str) -> int:
         iterations = [
@@ -116,10 +117,12 @@ class InMemoryQuestionSetRepository(QuestionSetRepository):
         return (max(iterations) + 1) if iterations else 1
 
     async def save(self, question_set: QuestionSet) -> None:
-        self._question_sets[question_set.id] = replace(question_set)
+        async with self._lock:
+            self._question_sets[question_set.id] = replace(question_set)
 
     async def get_by_id(self, question_set_id: str) -> QuestionSet | None:
-        question_set = self._question_sets.get(question_set_id)
-        if question_set is None:
-            return None
-        return replace(question_set)
+        async with self._lock:
+            question_set = self._question_sets.get(question_set_id)
+            if question_set is None:
+                return None
+            return replace(question_set)

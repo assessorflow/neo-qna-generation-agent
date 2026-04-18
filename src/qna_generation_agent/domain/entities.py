@@ -6,8 +6,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from qna_generation_agent.domain.enums import (
+    DifficultyLevel,
     GenerationStatus,
+    Purpose,
     QuestionType,
+    ValidationResult,
 )
 from qna_generation_agent.domain.errors import (
     InvalidStateTransitionError,
@@ -51,7 +54,7 @@ class Question:
     id: QuestionId
     text: str
     question_type: QuestionType
-    difficulty_level: str | None
+    difficulty_level: DifficultyLevel | None
     answer: Answer
     topic_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
@@ -69,7 +72,7 @@ class QuestionSet:
     id: str
     assessment_id: str
     iteration: int
-    purpose: str | None
+    purpose: Purpose | None
     questions: list[Question] = field(default_factory=list)
     status: GenerationStatus = GenerationStatus.PENDING
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -153,12 +156,12 @@ class GenerationRequest:
 
     id: str
     assessment_id: str
-    validation_result: str | None
+    validation_result: ValidationResult | None
     iteration: int | None  # Nullable for initial generation
     structured_count: int | None  # Nullable for regeneration
     non_structured_count: int | None  # Nullable for regeneration
-    difficulty_level: str | None  # Nullable for regeneration
-    purpose: str | None  # Nullable for regeneration
+    difficulty_level: DifficultyLevel | None  # Nullable for regeneration
+    purpose: Purpose | None  # Nullable for regeneration
     correlation_id: str
     workflow_id: str
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

@@ -8,9 +8,21 @@ for ensuring consistent question generation output.
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from typing import Any, cast
 
-from openai import AsyncOpenAI, AuthenticationError, NotFoundError, OpenAIError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    OpenAIError,
+    PermissionDeniedError,
+    RateLimitError,
+    UnprocessableEntityError,
+)
 from pydantic import BaseModel, ValidationError
 from strands import Agent
 from strands.models.openai import OpenAIModel
@@ -214,25 +226,72 @@ class StrandsLLMProvider(LLMProvider):
             question_type=QuestionType.NON_STRUCTURED,
         )
 
-    async def _generate(
+    def _map_exception(self, error: Exception) -> LLMTransientError | LLMPermanentError:
+        """Classify an exception from the LLM stack into a typed error.
+
+        OpenAI SDK errors are classified by HTTP semantics:
+        - Permanent (4xx client errors): auth, permissions, bad request, not found
+        - Transient (5xx server / network errors): APIError, connection, timeout, rate limit
+        - Unknown OpenAIError defaults to transient (safer to retry)
+        - Non-OpenAI exceptions fall back to string heuristics.
+        """
+        # Permanent OpenAI client errors
+        if isinstance(
+            error,
+            (
+                AuthenticationError,
+                PermissionDeniedError,
+                BadRequestError,
+                NotFoundError,
+                UnprocessableEntityError,
+            ),
+        ):
+            return LLMPermanentError(
+                "LLM request failed permanently",
+                model=self._model_id,
+                error=str(error),
+            )
+
+        # Transient OpenAI server / network errors
+        if isinstance(
+            error,
+            (APIError, APIConnectionError, APITimeoutError, RateLimitError, OpenAIError),
+        ):
+            return LLMTransientError(
+                "LLM request failed temporarily",
+                retry_after_seconds=30,
+                model=self._model_id,
+            )
+
+        # Fallback for non-OpenAI exceptions (e.g. from Strands internals)
+        message = str(error).lower()
+        if (
+            "rate limit" in message
+            or "timeout" in message
+            or "temporarily unavailable" in message
+        ):
+            return LLMTransientError(
+                "LLM request failed temporarily",
+                retry_after_seconds=30,
+                model=self._model_id,
+            )
+
+        return LLMPermanentError(
+            "LLM request failed permanently",
+            model=self._model_id,
+            error=str(error),
+        )
+
+    async def _invoke_agent(
         self,
         *,
         agent: Agent,
-        context: AssessmentContext,
-        count: int,
-        difficulty_level: str | None,
-        question_type: QuestionType,
-    ) -> QuestionBatch:
-        """Internal generation method."""
-        prompt = build_user_prompt(
-            context=context,
-            count=count,
-            difficulty_level=difficulty_level,
-            question_type=question_type,
-        )
+        prompt: str,
+    ) -> Any:
+        """Invoke Strands with timeout and mapped errors."""
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                result = await agent.invoke_async(
+                return await agent.invoke_async(
                     prompt,
                     structured_output_model=GeneratedQuestionBatchSchema,
                 )
@@ -243,24 +302,18 @@ class StrandsLLMProvider(LLMProvider):
                 model=self._model_id,
             ) from error
         except Exception as error:
-            # Map exceptions consistently without logging prompt content
-            message = str(error).lower()
-            if (
-                "rate limit" in message
-                or "timeout" in message
-                or "temporarily unavailable" in message
-            ):
-                raise LLMTransientError(
-                    "LLM request failed temporarily",
-                    retry_after_seconds=30,
-                    model=self._model_id,
-                ) from error
-            raise LLMPermanentError(
-                "LLM request failed permanently",
-                model=self._model_id,
-                error=str(error),
-            ) from error
+            raise self._map_exception(error) from error
 
+    def _build_question_batch(
+        self,
+        *,
+        result: Any,
+        count: int,
+        difficulty_level: str | None,
+        question_type: QuestionType,
+        prompt_version: str,
+    ) -> QuestionBatch:
+        """Convert a Strands result into a question batch."""
         structured_output = result.structured_output
 
         # Debug: Log what we got back from Strands
@@ -339,15 +392,38 @@ class StrandsLLMProvider(LLMProvider):
                 else None,
             )
 
-        prompt_version = (
-            "structured_v2"
-            if question_type is QuestionType.STRUCTURED
-            else "non_structured_v2"
-        )
         return QuestionBatch(
             questions=questions,
             model_name=self._model_id,
             prompt_version=prompt_version,
+        )
+
+    async def _generate(
+        self,
+        *,
+        agent: Agent,
+        context: AssessmentContext,
+        count: int,
+        difficulty_level: str | None,
+        question_type: QuestionType,
+    ) -> QuestionBatch:
+        """Internal generation method."""
+        prompt = build_user_prompt(
+            context=context,
+            count=count,
+            difficulty_level=difficulty_level,
+            question_type=question_type,
+        )
+        return self._build_question_batch(
+            result=await self._invoke_agent(agent=agent, prompt=prompt),
+            count=count,
+            difficulty_level=difficulty_level,
+            question_type=question_type,
+            prompt_version=(
+                "structured_v2"
+                if question_type is QuestionType.STRUCTURED
+                else "non_structured_v2"
+            ),
         )
 
     async def health_check(self) -> bool:
@@ -412,96 +488,10 @@ class StrandsLLMProvider(LLMProvider):
             agent = self._non_structured_agent
             qt = QuestionType.NON_STRUCTURED
 
-        try:
-            async with asyncio.timeout(self._timeout_seconds):
-                result = await agent.invoke_async(
-                    prompt,
-                    structured_output_model=GeneratedQuestionBatchSchema,
-                )
-        except TimeoutError as error:
-            raise LLMTransientError(
-                "LLM request timed out",
-                retry_after_seconds=10,
-                model=self._model_id,
-            ) from error
-        except Exception as error:
-            message = str(error).lower()
-            if (
-                "rate limit" in message
-                or "timeout" in message
-                or "temporarily unavailable" in message
-            ):
-                raise LLMTransientError(
-                    "LLM request failed temporarily",
-                    retry_after_seconds=30,
-                    model=self._model_id,
-                ) from error
-            raise LLMPermanentError(
-                "LLM request failed permanently",
-                model=self._model_id,
-                error=str(error),
-            ) from error
-
-        structured_output = result.structured_output
-        if structured_output is None or not isinstance(
-            structured_output, GeneratedQuestionBatchSchema
-        ):
-            raise LLMPermanentError(
-                "Structured output was not returned by Strands",
-                model=self._model_id,
-            )
-
-        # Validate output doesn't contain garbage (JVM text, log output, etc.)
-        raw_str = str(result.raw_output) if hasattr(result, "raw_output") else ""
-        if "JVM" in raw_str or "Method overriding" in raw_str or "Tool #" in raw_str:
-            raise LLMTransientError(
-                "LLM returned garbage output (mixed content)",
-                retry_after_seconds=5,
-                model=self._model_id,
-            )
-
-        parsed_difficulty = _parse_difficulty(difficulty_level)
-        questions: list[QuestionDraft] = []
-        skipped_count = 0
-        for item in structured_output.questions[:count]:
-            # Skip questions without required fields
-            if item.question_text is None:
-                skipped_count += 1
-                continue
-            # Use placeholder if answer missing (legacy path) - 3-prompt workflow adds real answers
-            answer = item.answer_text or "[Answer to be generated]"
-            questions.append(
-                QuestionDraft(
-                    question_text=item.question_text,
-                    answer_text=answer,
-                    question_type=qt,
-                    difficulty_level=parsed_difficulty,
-                    explanation=item.explanation,
-                    references=item.references,
-                    topic_id=item.topic_id,
-                    metadata={k: str(v) for k, v in (item.metadata or {}).items()},
-                )
-            )
-
-        if skipped_count > 0:
-            logger.warning(
-                "questions_skipped_missing_fields",
-                skipped=skipped_count,
-                expected=count,
-                received=len(structured_output.questions),
-            )
-
-        if len(questions) == 0:
-            raise LLMPermanentError(
-                "No valid questions returned by LLM",
-                expected=count,
-                raw_preview=str(result.raw_output)[:500]
-                if hasattr(result, "raw_output")
-                else None,
-            )
-
-        return QuestionBatch(
-            questions=questions,
-            model_name=self._model_id,
+        return self._build_question_batch(
+            result=await self._invoke_agent(agent=agent, prompt=prompt),
+            count=count,
+            difficulty_level=difficulty_level,
+            question_type=qt,
             prompt_version="langfuse_managed",
         )

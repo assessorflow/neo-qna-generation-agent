@@ -66,8 +66,8 @@ tasks:
       - uv run pip-audit --desc --format=json 2>/dev/null || uv run pip-audit --desc
 
   check:
-    desc: Run the full local quality gate (lint, typecheck, test, coverage, audit)
-    deps: [lint, typecheck, test, coverage, audit]
+    desc: Run the full local quality gate (lint, typecheck, coverage, audit)
+    deps: [lint, typecheck, coverage, audit]
 
   build:
     desc: Build container image

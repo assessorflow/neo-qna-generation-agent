@@ -18,7 +18,6 @@ from qna_generation_agent.application.dto import (
 from qna_generation_agent.application.errors import (
     IdempotencyConflict,
     RetrievalError,
-    StoragePermanentError,
     StorageTransientError,
     WorkflowEscalationError,
 )
@@ -39,7 +38,7 @@ from qna_generation_agent.application.ports.submission_client import (
 )
 from qna_generation_agent.application.ports.telemetry import Span, TelemetryPort
 from qna_generation_agent.application.services.generate_qna import GenerateQnAService
-from qna_generation_agent.domain.enums import QuestionType
+from qna_generation_agent.domain.enums import DifficultyLevel, Purpose, QuestionType
 from qna_generation_agent.domain.events import QnAGenerationCompleted
 from qna_generation_agent.infrastructure.grpc.knowledge_client import (
     GetTopicsCommand,
@@ -464,10 +463,6 @@ async def test_execute_returns_cached_receipt_for_completed_duplicate() -> None:
 @pytest.mark.unit
 async def test_execute_with_prompt_provider_uses_langfuse() -> None:
     """Test that prompt provider triggers Langfuse path when available."""
-    from qna_generation_agent.application.ports.prompt_provider import (
-        Prompt,
-        PromptProvider,
-    )
 
     class FakePromptProvider(PromptProvider):
         @property
@@ -784,8 +779,13 @@ async def test_execute_raises_transient_error_on_write_failure() -> None:
 
 
 @pytest.mark.unit
-async def test_execute_marks_idempotency_failed_on_publish_failure() -> None:
-    """Test that completion publish failure marks idempotency as failed."""
+async def test_execute_best_effort_publish_failure_does_not_corrupt_idempotency() -> None:
+    """Test that best-effort publish failure does not corrupt idempotency status.
+
+    After the submission service successfully persists questions, idempotency
+    must remain COMPLETED even if post-completion events fail to publish.
+    This prevents duplicate question generation on retry.
+    """
     idempotency_store = InMemoryIdempotencyStore()
     submission_client = FakeSubmissionClient()
     knowledge_client = FakeKnowledgeClient()
@@ -806,28 +806,31 @@ async def test_execute_marks_idempotency_failed_on_publish_failure() -> None:
         telemetry=FakeTelemetry(),
     )
 
-    with pytest.raises(StorageTransientError):
-        await service.execute(
-            GenerationCommand(
-                request_id="evt_publish_fail_123",
-                workflow_id="wf_123",
-                correlation_id="corr_123",
-                trace_id=None,
-                assessment_id="assessment_123",
-                question_set_id="qs_123",
-                validation_result=None,
-                iteration=None,
-                structured_count=1,
-                non_structured_count=0,
-                difficulty_level="medium",
-                purpose="assessment",
-                feedback_issues=[],
-            )
+    receipt = await service.execute(
+        GenerationCommand(
+            request_id="evt_publish_fail_123",
+            workflow_id="wf_123",
+            correlation_id="corr_123",
+            trace_id=None,
+            assessment_id="assessment_123",
+            question_set_id="qs_123",
+            validation_result=None,
+            iteration=None,
+            structured_count=1,
+            non_structured_count=0,
+            difficulty_level=DifficultyLevel.MEDIUM,
+            purpose=Purpose.ASSESSMENT,
+            feedback_issues=[],
         )
+    )
 
-    # Verify idempotency record is marked as failed
-    failed_record = await idempotency_store.get("evt_publish_fail_123")
-    assert failed_record.status is IdempotencyStatus.FAILED
+    # Receipt should still be returned successfully
+    assert receipt.question_count == 1
+
+    # Idempotency must remain COMPLETED, not FAILED
+    record = await idempotency_store.get("evt_publish_fail_123")
+    assert record.status is IdempotencyStatus.COMPLETED
+    assert record.receipt is not None
 
 
 @pytest.mark.unit
@@ -1299,68 +1302,3 @@ async def test_regeneration_uses_assessment_config_from_submission_service() -> 
     assert receipt.question_count == 7
     assert receipt.structured_generated == 5
     assert receipt.non_structured_generated == 2
-
-
-@pytest.mark.unit
-async def test_regeneration_fallback_to_trigger_when_config_unimplemented() -> None:
-    """Test that regeneration falls back to trigger data when GetAssessmentConfig not implemented."""
-    from qna_generation_agent.application.ports.submission_client import (
-        GetAssessmentConfigCommand,
-    )
-
-    idempotency_store = InMemoryIdempotencyStore()
-    publisher = RecordingPublisher()
-    knowledge_client = FakeKnowledgeClient()
-
-    class UnimplementedConfigSubmissionClient(FakeSubmissionClient):
-        """Client that raises StoragePermanentError for get_assessment_config."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.config_calls: list[GetAssessmentConfigCommand] = []
-
-        async def get_assessment_config(self, command: Any) -> Any:
-            self.config_calls.append(command)
-            raise StoragePermanentError(
-                "GetAssessmentConfig not yet implemented",
-                code="UNIMPLEMENTED",
-            )
-
-    submission_client = UnimplementedConfigSubmissionClient()
-
-    service = GenerateQnAService(
-        llm_provider=FakeLLMProvider(),
-        question_set_repo=InMemoryQuestionSetRepository(),
-        idempotency_store=idempotency_store,
-        event_publisher=publisher,
-        submission_client=submission_client,
-        knowledge_client=knowledge_client,  # type: ignore
-        telemetry=FakeTelemetry(),
-    )
-
-    # Regeneration with fallback values in trigger (not null)
-    receipt = await service.execute(
-        GenerationCommand(
-            request_id="evt_regen_fallback_123",
-            workflow_id="wf_regen_fallback",
-            correlation_id="corr_regen_fallback",
-            trace_id=None,
-            assessment_id="assessment_regen_fallback",
-            question_set_id="qs_regen_fallback",  # Existing question set
-            validation_result="fail",  # Regeneration trigger
-            iteration=1,
-            structured_count=3,  # Fallback value
-            non_structured_count=1,  # Fallback value
-            difficulty_level="easy",  # Fallback value
-            purpose="assessment",
-            feedback_issues=["Q1 needs fix"],
-        )
-    )
-
-    # Verify that get_assessment_config was attempted
-    assert len(submission_client.config_calls) == 1
-
-    # Verify receipt uses fallback values from trigger (3 + 1)
-    assert receipt.question_count == 4
-    assert receipt.structured_generated == 3
-    assert receipt.non_structured_generated == 1

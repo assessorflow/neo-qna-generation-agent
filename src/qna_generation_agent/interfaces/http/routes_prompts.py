@@ -14,6 +14,7 @@ from qna_generation_agent.app.logging import get_logger
 from qna_generation_agent.application.services.prompt_test_service import (
     PromptTestResult,
 )
+from qna_generation_agent.interfaces.http.middleware import _resolve_request_id
 from qna_generation_agent.interfaces.http.schemas import (
     AssessmentGeneratorTestRequest,
     ErrorResponse,
@@ -21,19 +22,6 @@ from qna_generation_agent.interfaces.http.schemas import (
     MCQExplanationGeneratorTestRequest,
     PromptTestResponse,
 )
-
-
-def _resolve_request_id(request: Request) -> str:
-    """Extract request ID from headers or generate new one."""
-    import uuid
-
-    raw_request_id = request.get_first_header(
-        b"x-request-id"
-    ) or request.get_first_header(b"x-correlation-id")
-    if raw_request_id is None:
-        return str(uuid.uuid4())
-    return raw_request_id.decode("utf-8")
-
 
 logger = get_logger(__name__)
 
@@ -146,11 +134,19 @@ def register_prompt_test_routes(app: Application) -> None:
             )
 
         # Service is available (checked by _get_test_service_error)
-        assert container.prompt_test_service is not None
+        service = container.prompt_test_service
+        if service is None:
+            return json(
+                ErrorResponse(
+                    error="Prompt test service is not available.",
+                    request_id=_resolve_request_id(request),
+                ).model_dump(mode="json"),
+                status=503,
+            )
 
         body = request_body.value
 
-        result = await container.prompt_test_service.test_assessment_generator(
+        result = await service.test_assessment_generator(
             structured_count=body.structured_count,
             non_structured_count=body.non_structured_count,
             difficulty=body.difficulty,
@@ -196,11 +192,19 @@ def register_prompt_test_routes(app: Application) -> None:
             )
 
         # Service is available (checked by _get_test_service_error)
-        assert container.prompt_test_service is not None
+        service = container.prompt_test_service
+        if service is None:
+            return json(
+                ErrorResponse(
+                    error="Prompt test service is not available.",
+                    request_id=_resolve_request_id(request),
+                ).model_dump(mode="json"),
+                status=503,
+            )
 
         body = request_body.value
 
-        result = await container.prompt_test_service.test_mcq_answer_generator(
+        result = await service.test_mcq_answer_generator(
             question_stem=body.question_stem,
             grammar_target=body.grammar_target,
             difficulty=body.difficulty,
@@ -250,11 +254,19 @@ def register_prompt_test_routes(app: Application) -> None:
             )
 
         # Service is available (checked by _get_test_service_error)
-        assert container.prompt_test_service is not None
+        service = container.prompt_test_service
+        if service is None:
+            return json(
+                ErrorResponse(
+                    error="Prompt test service is not available.",
+                    request_id=_resolve_request_id(request),
+                ).model_dump(mode="json"),
+                status=503,
+            )
 
         body = request_body.value
 
-        result = await container.prompt_test_service.test_mcq_explanation_generator(
+        result = await service.test_mcq_explanation_generator(
             question=body.question,
             options=body.options,
             correct_answer=body.correct_answer,

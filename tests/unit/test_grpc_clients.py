@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import grpc
 import pytest
+import structlog
 
 from qna_generation_agent.application.errors import (
     StoragePermanentError,
@@ -16,11 +17,13 @@ from qna_generation_agent.application.errors import (
 )
 from qna_generation_agent.application.ports.submission_client import (
     CreateQuestionSetCommand,
+    GetAssessmentConfigCommand,
     IncrementIterationCommand,
     Question,
     WriteGeneratedQuestionsCommand,
 )
 from qna_generation_agent.infrastructure.grpc.knowledge_client import (
+    GetChunksByIdsCommand,
     GetTopicsCommand,
     GrpcKnowledgeClient,
     SimilaritySearchCommand,
@@ -383,10 +386,6 @@ async def test_knowledge_client_get_chunks_by_ids(
         lambda channel: fake_stub,
     )
 
-    from qna_generation_agent.application.ports.knowledge_client import (
-        GetChunksByIdsCommand,
-    )
-
     client = GrpcKnowledgeClient(target="grpc://localhost:50052")
     result = await client.get_chunks_by_ids(
         GetChunksByIdsCommand(chunk_ids=["chunk_001", "chunk_002"])
@@ -476,7 +475,6 @@ async def test_knowledge_client_similarity_search_propagates_metadata(
     )
 
     # Set context variables
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -521,14 +519,9 @@ async def test_knowledge_client_get_chunks_by_ids_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_test_123")
-
-    from qna_generation_agent.application.ports.knowledge_client import (
-        GetChunksByIdsCommand,
-    )
 
     client = GrpcKnowledgeClient(target="grpc://localhost:50052")
     await client.get_chunks_by_ids(GetChunksByIdsCommand(chunk_ids=["chunk_001"]))
@@ -558,7 +551,6 @@ async def test_knowledge_client_get_topics_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(correlation_id="corr_test_456")
@@ -591,7 +583,6 @@ async def test_submission_client_create_question_set_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -628,7 +619,6 @@ async def test_submission_client_write_generated_questions_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_write_789")
@@ -673,7 +663,6 @@ async def test_submission_client_increment_iteration_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(correlation_id="corr_inc_999")
@@ -709,7 +698,6 @@ async def test_grpc_metadata_no_context_returns_none(
     )
 
     # Clear any existing context
-    import structlog
 
     structlog.contextvars.clear_contextvars()
 
@@ -930,14 +918,9 @@ async def test_submission_client_get_assessment_config_success(
         lambda channel: fake_stub,
     )
 
-    import structlog
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_config_123")
-
-    from qna_generation_agent.application.ports.submission_client import (
-        GetAssessmentConfigCommand,
-    )
 
     client = GrpcSubmissionClient(target="grpc://localhost:50051")
     result = await client.get_assessment_config(
@@ -983,10 +966,6 @@ async def test_submission_client_get_assessment_config_unimplemented_error(
         lambda channel: fake_stub,
     )
 
-    from qna_generation_agent.application.ports.submission_client import (
-        GetAssessmentConfigCommand,
-    )
-
     client = GrpcSubmissionClient(target="grpc://localhost:50051")
 
     with pytest.raises(StoragePermanentError) as exc_info:
@@ -1016,10 +995,6 @@ async def test_submission_client_get_assessment_config_transient_error(
     monkeypatch.setattr(
         "qna_generation_agent.infrastructure.grpc.submission_client.SubmissionServiceStub",
         lambda channel: fake_stub,
-    )
-
-    from qna_generation_agent.application.ports.submission_client import (
-        GetAssessmentConfigCommand,
     )
 
     client = GrpcSubmissionClient(target="grpc://localhost:50051")

@@ -10,6 +10,23 @@ from qna_generation_agent.application.dto import AssessmentContext
 from qna_generation_agent.domain.enums import QuestionType
 
 # =============================================================================
+# Utility Functions
+# =============================================================================
+
+
+def format_chunks_for_prompt(chunks: list[str]) -> str:
+    """Format chunks with indices for prompt insertion.
+
+    Args:
+        chunks: List of chunk strings to format.
+
+    Returns:
+        Formatted string with each chunk labeled by index.
+    """
+    return "\n\n".join(f"[Chunk {i}] {chunk}" for i, chunk in enumerate(chunks, start=1))
+
+
+# =============================================================================
 # Legacy GeneratedQuestion Schemas (for backward compatibility)
 # =============================================================================
 
@@ -412,6 +429,31 @@ class AssessmentGeneratorOutputSchema(BaseModel):
         description="List of generated questions (both MCQ and open-ended)",
     )
 
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _ensure_questions_list(
+        cls, value: object
+    ) -> list[dict[str, object]]:
+        """Ensure questions is a valid list, handling LLM output edge cases.
+
+        Handles cases where LLM returns:
+        - A single dict instead of a list
+        - None or missing field
+        - A dict with numeric keys (incorrect JSON structure)
+        """
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            # LLM might return {0: {...}, 1: {...}} or single question as dict
+            # Try to convert dict values to list if keys look numeric
+            if all(isinstance(k, (int, str)) and str(k).isdigit() for k in value.keys()):
+                return list(value.values())
+            # Single question returned as dict
+            return [value]
+        if not isinstance(value, list):
+            return []
+        return value
+
 
 # =============================================================================
 # Prompt Input Schemas (for variable validation)
@@ -458,15 +500,12 @@ class AssessmentGeneratorInputSchema(BaseModel):
         difficulty_level: str | None,
     ) -> AssessmentGeneratorInputSchema:
         """Build input schema from AssessmentContext."""
-        chunks_formatted = "\n\n".join(
-            f"[Chunk {i}] {chunk}" for i, chunk in enumerate(context.chunks, start=1)
-        )
         return cls(
             structured_count=structured_count,
             non_structured_count=non_structured_count,
             difficulty=difficulty_level or "medium",
             topics=", ".join(context.topic_ids),
-            chunks=chunks_formatted,
+            chunks=format_chunks_for_prompt(context.chunks),
         )
 
 

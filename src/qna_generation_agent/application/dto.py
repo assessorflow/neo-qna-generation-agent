@@ -10,6 +10,7 @@ from qna_generation_agent.domain.enums import (
     GenerationStatus,
     Purpose,
     QuestionType,
+    ValidationResult,
 )
 
 
@@ -61,7 +62,7 @@ class GenerationCommand:
     trace_id: str | None  # For distributed tracing propagation
     assessment_id: str
     question_set_id: str  # Required for all flows
-    validation_result: str | None
+    validation_result: ValidationResult | None
     iteration: int | None  # Nullable for initial generation
     structured_count: int | None  # Nullable for regeneration
     non_structured_count: int | None  # Nullable for regeneration

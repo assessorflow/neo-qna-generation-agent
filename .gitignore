@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv
+.venv/
 
 # IDEs
 .idea/
@@ -50,6 +51,7 @@ Thumbs.db
 
 # Project specific
 *.log
+*.tmp
 .env
 .env.local
 .env.*

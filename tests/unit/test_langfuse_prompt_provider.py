@@ -5,8 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from langfuse.api.commons.errors import (
+    NotFoundError,
+    UnauthorizedError,
+)
 
-from qna_generation_agent.application.errors import StoragePermanentError
+from qna_generation_agent.application.errors import (
+    StoragePermanentError,
+    StorageTransientError,
+)
 from qna_generation_agent.application.ports.prompt_provider import Prompt
 from qna_generation_agent.infrastructure.llm.langfuse_prompt_provider import (
     LangfusePromptProvider,
@@ -41,12 +48,17 @@ class FakeLangfuseClient:
         self.secret_key = kwargs.get("secret_key")
         self.host = kwargs.get("host")
         self.environment = kwargs.get("environment")
+        self.prompt_error = kwargs.get("prompt_error")
         self.prompts: dict[str, FakeLangfusePrompt] = {}
         self.flushed = False
 
     def get_prompt(self, name: str, **kwargs: Any) -> FakeLangfusePrompt:
+        if self.prompt_error is not None:
+            raise self.prompt_error
         if name not in self.prompts:
-            raise Exception(f"Prompt '{name}' not found")
+            raise NotFoundError(
+                {"error": {"message": f"Prompt '{name}' not found"}}
+            )
         return self.prompts[name]
 
     def create_prompt(
@@ -130,6 +142,68 @@ async def test_prompt_provider_handles_not_found(
         await provider.get_prompt("Non-existent Prompt")
 
     assert "not found" in str(exc_info.value).lower()
+
+
+@pytest.mark.unit
+async def test_prompt_provider_handles_unauthorized_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = FakeLangfuseClient(
+        public_key="pk-test",
+        secret_key="sk-test",
+        host="https://langfuse.example",
+        environment="test",
+        prompt_error=UnauthorizedError(
+            {"error": {"message": "unauthorized"}}
+        ),
+    )
+
+    monkeypatch.setattr(
+        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
+        lambda **kwargs: fake_client,
+    )
+
+    provider = LangfusePromptProvider(
+        public_key="pk-test",
+        secret_key="sk-test",
+        host="https://langfuse.example",
+        environment="test",
+    )
+
+    with pytest.raises(StoragePermanentError) as exc_info:
+        await provider.get_prompt("Assessment Generator")
+
+    assert "authentication" in str(exc_info.value).lower()
+
+
+@pytest.mark.unit
+async def test_prompt_provider_handles_transient_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = FakeLangfuseClient(
+        public_key="pk-test",
+        secret_key="sk-test",
+        host="https://langfuse.example",
+        environment="test",
+        prompt_error=RuntimeError("temporary outage"),
+    )
+
+    monkeypatch.setattr(
+        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
+        lambda **kwargs: fake_client,
+    )
+
+    provider = LangfusePromptProvider(
+        public_key="pk-test",
+        secret_key="sk-test",
+        host="https://langfuse.example",
+        environment="test",
+    )
+
+    with pytest.raises(StorageTransientError) as exc_info:
+        await provider.get_prompt("Assessment Generator")
+
+    assert "temporary outage" in str(exc_info.value).lower()
 
 
 @pytest.mark.unit

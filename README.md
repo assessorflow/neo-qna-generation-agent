@@ -175,14 +175,25 @@ pip install -e ".[dev,test,lint]"
 | `PROMPT_LABEL` | No | `production` | Default prompt label |
 | `ENABLE_TEST_ROUTES` | No | `false` | Enable `/test/*` debug endpoints |
 | `QA_GEN_MAX_ITERATIONS` | No | `3` | Max regeneration iterations |
+| `QA_GEN_MAX_RETRIES` | No | `3` | Max retries per generation attempt |
 | `QA_GEN_TIMEOUT_MS` | No | `30000` | Generation timeout (ms) |
 | `LLM_TIMEOUT_SECONDS` | No | `120` | LLM call timeout |
+| `SUBMISSION_ASSESSMENT_CONFIG_ENABLED` | No | `true` | Fetch assessment config from Submission Service |
+| `RELEASE` | No | - | Release version for observability |
+| `ENVIRONMENT` | No | `local` | Runtime environment (`local`, `dev`, `staging`, `prod`) |
+| `PUBSUB_ENABLED` | No | `true` | Enable/disable Pub/Sub |
 | `CORS_ALLOWED_ORIGINS` | No | - | Comma-separated allowed origins |
 | `CORS_ALLOW_CREDENTIALS` | No | `false` | Enable CORS credentials |
+
+> **Note:** All environment variables also support a `QNA_` prefix (e.g., `QNA_OPENAI_API_KEY`). The prefixed variant takes precedence if both are set.
 
 ### Example .env File
 
 ```bash
+# Runtime
+ENVIRONMENT=local
+RELEASE=0.1.0
+
 # Required LLM configuration
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
@@ -199,6 +210,7 @@ SUBMISSION_SERVICE_URL=grpc://localhost:50051
 KNOWLEDGE_SERVICE_URL=grpc://localhost:50052
 
 # Optional: Pub/Sub for event-driven mode
+PUBSUB_ENABLED=true
 PUBSUB_PROJECT_ID=my-gcp-project
 PUBSUB_SUBSCRIPTION_TRIGGER=qna-trigger-sub
 PUBSUB_TOPIC_COMPLETE=qna-complete-topic
@@ -434,7 +446,7 @@ uv run pytest --cov=qna_generation_agent --cov-report=html
 - **Type checking:** Strict mypy with `disallow_untyped_defs`
 - **Linting:** Ruff with E, F, W, I, UP, B, C4, ASYNC, RUF rules
 - **Logging:** Structured JSON via structlog
-- **Testing:** pytest with 80% coverage minimum
+- **Testing:** pytest with 80% coverage minimum (370+ tests)
 
 ## Security Considerations
 

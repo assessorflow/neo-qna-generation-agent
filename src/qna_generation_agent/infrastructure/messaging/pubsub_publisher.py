@@ -116,8 +116,6 @@ class PubSubCompletionPublisher(EventPublisher):
                 "Pub/Sub publish was rejected due to permissions",
                 topic=self._topic_id,
             ) from error
-        except StoragePermanentError:
-            raise
         except Exception as error:
             raise StorageTransientError(
                 "Pub/Sub publish failed",

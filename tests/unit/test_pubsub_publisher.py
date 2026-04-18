@@ -143,20 +143,6 @@ class TestPubSubCompletionPublisher:
             non_structured_generated=1,
             iteration=1,
             correlation_id="corr_123",
-            trace_id="trace_123",
-        )
-        fake_client = FakePublisherClient()
-        publisher._client = fake_client
-
-        event = QnAGenerationCompleted(
-            event_id="evt_123",
-            workflow_id="wf_123",
-            assessment_id="assessment_123",
-            question_set_id="qs_123",
-            structured_generated=2,
-            non_structured_generated=1,
-            iteration=1,
-            correlation_id="corr_123",
             trace_id=None,
         )
 

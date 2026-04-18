@@ -6,9 +6,11 @@ from enum import StrEnum
 
 __all__ = [
     "DifficultyLevel",
+    "GenerationStage",
     "GenerationStatus",
     "Purpose",
     "QuestionType",
+    "ValidationResult",
 ]
 
 
@@ -18,6 +20,22 @@ class DifficultyLevel(StrEnum):
     EASY = "easy"
     MEDIUM = "medium"
     HARD = "hard"
+
+
+class GenerationStage(StrEnum):
+    """Generation stages for LLM provider routing."""
+
+    ASSESSMENT_GENERATOR = "assessment_generator"
+    QUESTION_GENERATION = "question_generation"
+    MCQ_ANSWER_GENERATOR = "mcq_answer_generator"
+    MCQ_EXPLANATION_GENERATOR = "mcq_explanation_generator"
+
+
+class ValidationResult(StrEnum):
+    """Validation result values."""
+
+    PASS = "pass"
+    FAIL = "fail"
 
 
 class QuestionType(StrEnum):

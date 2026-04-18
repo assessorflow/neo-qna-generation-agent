@@ -6,6 +6,11 @@ import asyncio
 from typing import Any
 
 from langfuse import Langfuse, observe
+from langfuse.api.commons.errors import (
+    AccessDeniedError,
+    NotFoundError,
+    UnauthorizedError,
+)
 
 from qna_generation_agent.app.logging import bind_context, get_logger
 from qna_generation_agent.application.errors import (
@@ -146,18 +151,17 @@ class LangfusePromptProvider(PromptProvider):
             )
 
             return prompt
+        except NotFoundError as error:
+            raise StoragePermanentError(
+                f"Prompt '{name}' not found in Langfuse",
+                prompt_name=name,
+            ) from error
+        except (UnauthorizedError, AccessDeniedError) as error:
+            raise StoragePermanentError(
+                "Authentication failed with Langfuse",
+                prompt_name=name,
+            ) from error
         except Exception as error:
-            error_msg = str(error).lower()
-            if "not found" in error_msg or "does not exist" in error_msg:
-                raise StoragePermanentError(
-                    f"Prompt '{name}' not found in Langfuse",
-                    prompt_name=name,
-                ) from error
-            if "unauthorized" in error_msg or "authentication" in error_msg:
-                raise StoragePermanentError(
-                    "Authentication failed with Langfuse",
-                    prompt_name=name,
-                ) from error
             raise StorageTransientError(
                 f"Failed to fetch prompt '{name}' from Langfuse",
                 prompt_name=name,

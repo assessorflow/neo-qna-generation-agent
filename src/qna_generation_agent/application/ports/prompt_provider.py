@@ -35,6 +35,30 @@ class Prompt:
         """Check if this is a chat-style prompt."""
         return self.chat_messages is not None and len(self.chat_messages) > 0
 
+    @property
+    def version_string(self) -> str:
+        """Return formatted version string (name@version)."""
+        return f"{self.name}@v{self.version}"
+
+    @staticmethod
+    def compiled_to_string(compiled: str | list[dict[str, Any]]) -> str:
+        """Convert compiled prompt (text or chat format) to string.
+
+        Args:
+            compiled: Either a string (text prompt) or list of message dicts
+                     (chat prompt).
+
+        Returns:
+            String representation of the compiled prompt.
+        """
+        if isinstance(compiled, str):
+            return compiled
+        elif isinstance(compiled, list) and len(compiled) > 0:
+            return "\n\n".join(
+                msg.get("content", "") for msg in compiled if isinstance(msg, dict)
+            )
+        return str(compiled)
+
     def compile(self, **variables: Any) -> str | list[dict[str, Any]]:
         """Compile the prompt with variables.
 
