@@ -10,7 +10,6 @@ from blacksheep import Request, Response
 from blacksheep.server.responses import json
 
 from qna_generation_agent.app.logging import bind_context, clear_context, get_logger
-from qna_generation_agent.app.settings import Settings
 from qna_generation_agent.application.errors import (
     IdempotencyConflict,
     TransientError,
@@ -54,43 +53,6 @@ def _get_cors_origin_header(
 
     # Origin not allowed - return empty (browser will block)
     return (b"access-control-allow-origin", b"")
-
-
-async def cors_middleware(
-    request: Request,
-    handler: Handler,
-    settings: Settings,
-) -> Response:
-    """Add CORS headers for browser access with configurable origins.
-
-    Security:
-        - Validates Origin header against configured allowlist
-        - Blocks credentials when wildcard is used
-        - Returns empty origin header for disallowed origins
-    """
-    if request.method == "OPTIONS":
-        response = Response(204)
-    else:
-        response = await handler(request)
-
-    request_origin = request.get_first_header(b"origin")
-    origin_header_name, origin_header_value = _get_cors_origin_header(
-        request_origin,
-        settings.cors_origins_list,
-        settings.cors_allow_credentials,
-    )
-
-    response.add_header(origin_header_name, origin_header_value)
-    response.add_header(b"access-control-allow-methods", b"GET, POST, OPTIONS")
-    response.add_header(
-        b"access-control-allow-headers",
-        b"content-type, accept, authorization, x-request-id, x-correlation-id",
-    )
-
-    if settings.cors_allow_credentials:
-        response.add_header(b"access-control-allow-credentials", b"true")
-
-    return response
 
 
 def _resolve_request_id(request: Request) -> str:
