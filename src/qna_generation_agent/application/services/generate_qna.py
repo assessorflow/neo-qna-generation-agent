@@ -14,7 +14,6 @@ from qna_generation_agent.application.dto import (
     AssessmentContext,
     GenerationCommand,
     GenerationReceipt,
-    QuestionDraft,
 )
 from qna_generation_agent.application.errors import (
     GenerationError,
@@ -37,7 +36,6 @@ from qna_generation_agent.application.ports.knowledge_client import (
 )
 from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.application.ports.prompt_provider import (
-    Prompt,
     PromptProvider,
 )
 from qna_generation_agent.application.ports.publisher import (
@@ -74,6 +72,18 @@ from qna_generation_agent.domain.events import QnAGenerationCompleted
 from qna_generation_agent.domain.value_objects import AnswerId, QuestionId
 
 logger = get_logger(__name__)
+
+
+DEFAULT_ASSESSMENT_SYSTEM_PROMPT = (
+    "You are an expert assessment creator for English language proficiency tests. "
+    "Generate a mixed set of structured multiple-choice questions and open-ended "
+    "questions grounded in the source material. Follow the requested counts "
+    "exactly and return valid JSON matching the schema."
+)
+
+# Overall generation timeout per stage (in seconds)
+# This is higher than the LLM timeout to allow for retries and overhead
+GENERATION_STAGE_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,161 +467,8 @@ class GenerateQnAService:
                 "regeneration_feedback_received",
                 issues=command.feedback_issues,
             )
-
-        async def generate_structured() -> tuple[list[DomainQuestion], str | None]:
-            if not request.structured_count:
-                logger.info("skipping_structured_generation", count=0)
-                return [], None
-            try:
-                logger.info(
-                    "llm_generate_structured_started",
-                    count=request.structured_count,
-                    difficulty=request.difficulty_level,
-                    correlation_id=request.correlation_id,
-                )
-
-                # Use Langfuse prompt provider with 3-prompt workflow
-                if self._prompt_provider is not None:
-                    (
-                        questions,
-                        prompt_version,
-                    ) = await self._generate_structured_three_prompt(
-                        context=context,
-                        count=request.structured_count,
-                        difficulty_level=request.difficulty_level,
-                        correlation_id=request.correlation_id,
-                    )
-                else:
-                    logger.debug(
-                        "llm_generate_structured_legacy",
-                        context_chunks=len(context.chunks),
-                    )
-
-                    # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
-                    batch = await expensive_provider.generate_structured(
-                        context=context,
-                        count=request.structured_count,
-                        difficulty_level=request.difficulty_level,
-                        correlation_id=request.correlation_id,
-                    )
-                    questions = [
-                        self._to_domain_question(draft) for draft in batch.questions
-                    ]
-                    prompt_version = None  # Legacy path doesn't track prompt version
-
-                logger.info(
-                    "llm_generate_structured_complete",
-                    generated_count=len(questions),
-                )
-                return questions, prompt_version
-            except (LLMTransientError, LLMPermanentError):
-                # Preserve typed LLM errors for proper retry semantics
-                raise
-            except Exception as error:
-                # Get the provider that was used (expensive for question generation)
-                provider_used = self._expensive_llm_provider or self._llm_provider
-                logger.error(
-                    "llm_generate_structured_failed",
-                    error=str(error),
-                    error_type=type(error).__name__,
-                    model=provider_used.model_id,
-                )
-                raise GenerationError(
-                    "Failed to generate structured questions",
-                    model=provider_used.model_id,
-                ) from error
-
-        async def generate_non_structured() -> tuple[list[DomainQuestion], str | None]:
-            if not request.non_structured_count:
-                logger.info("skipping_non_structured_generation", count=0)
-                return [], None
-            try:
-                logger.info(
-                    "llm_generate_non_structured_started",
-                    count=request.non_structured_count,
-                    difficulty=request.difficulty_level,
-                    correlation_id=request.correlation_id,
-                )
-
-                prompt_version: str | None = None
-
-                # Use Langfuse prompt provider if available, otherwise fallback to legacy
-                if self._prompt_provider is not None:
-                    from qna_generation_agent.infrastructure.llm.prompt_builder import (
-                        AssessmentGeneratorInputSchema,
-                    )
-
-                    prompt_obj = await self._prompt_provider.get_prompt(
-                        "Assessment Generator",
-                        label=self._prompt_provider.default_label,
-                    )
-                    # Track prompt version for audit
-                    prompt_version = prompt_obj.version_string
-                    input_data = AssessmentGeneratorInputSchema.from_context(
-                        context=context,
-                        structured_count=0,
-                        non_structured_count=request.non_structured_count,
-                        difficulty_level=request.difficulty_level,
-                    )
-                    compiled_prompt = prompt_obj.compile(**input_data.model_dump())
-                    logger.debug(
-                        "llm_generate_non_structured_prompt_compiled",
-                        prompt_version=prompt_version,
-                        prompt_length=len(compiled_prompt)
-                        if isinstance(compiled_prompt, str)
-                        else len(str(compiled_prompt)),
-                    )
-                    # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
-                    batch = await expensive_provider.generate_with_prompt(
-                        prompt=compiled_prompt
-                        if isinstance(compiled_prompt, str)
-                        else str(compiled_prompt),
-                        count=request.non_structured_count,
-                        difficulty_level=request.difficulty_level,
-                        correlation_id=request.correlation_id,
-                        question_type="non_structured",
-                    )
-                else:
-                    logger.debug(
-                        "llm_generate_non_structured_legacy",
-                        context_chunks=len(context.chunks),
-                    )
-                    # Use expensive provider for question generation
-                    expensive_provider = self._get_provider_for_stage(GenerationStage.QUESTION_GENERATION)
-                    batch = await expensive_provider.generate_non_structured(
-                        context=context,
-                        count=request.non_structured_count,
-                        difficulty_level=request.difficulty_level,
-                        correlation_id=request.correlation_id,
-                    )
-
-                questions = [
-                    self._to_domain_question(draft) for draft in batch.questions
-                ]
-                logger.info(
-                    "llm_generate_non_structured_complete",
-                    generated_count=len(questions),
-                    questions_preview=[q.text[:100] for q in questions[:3]],
-                )
-                return questions, prompt_version
-            except (LLMTransientError, LLMPermanentError):
-                # Preserve typed LLM errors for proper retry semantics
-                raise
-            except Exception as error:
-                # Get the provider that was used (expensive for question generation)
-                provider_used = self._expensive_llm_provider or self._llm_provider
-                logger.error(
-                    "llm_generate_non_structured_failed",
-                    error=str(error),
-                    error_type=type(error).__name__,
-                    model=provider_used.model_id,
-                )
-                raise GenerationError(
-                    "Failed to generate non-structured questions",
-                    model=provider_used.model_id,
-                ) from error
+        assessment_questions: list[Any] = []
+        prompt_version = "qa-gen/unknown@v0"
 
         with (
             self._telemetry.trace(
@@ -621,24 +478,48 @@ class GenerateQnAService:
             if self._telemetry is not None
             else nullcontext()
         ):
-            # Execute both generation tasks concurrently
-            structured_result, non_structured_result = await asyncio.gather(
-                generate_structured(),
-                generate_non_structured(),
-            )
-            # Unpack results (questions, prompt_version)
-            structured_questions, structured_prompt_version = structured_result
-            non_structured_questions, non_structured_prompt_version = (
-                non_structured_result
+            assessment_questions, prompt_version = await self._generate_assessment_questions(
+                context=context,
+                structured_count=request.structured_count or 0,
+                non_structured_count=request.non_structured_count or 0,
+                difficulty_level=request.difficulty_level,
+                correlation_id=request.correlation_id,
             )
 
-            for q in structured_questions:
-                question_set.add_question(q)
-            for q in non_structured_questions:
-                question_set.add_question(q)
+            for idx, question in enumerate(assessment_questions):
+                if question.question_type == "structured":
+                    final_question = await self._generate_structured_question_three_prompt(
+                        question=question,
+                        difficulty_level=request.difficulty_level,
+                        question_index=idx,
+                    )
+                    if final_question is not None:
+                        question_set.add_question(final_question)
+                    continue
 
-        structured_generated = len(structured_questions)
-        non_structured_generated = len(non_structured_questions)
+                if question.question_type == "non_structured":
+                    question_set.add_question(
+                        self._assessment_question_to_domain_question(
+                            question,
+                            difficulty_level=request.difficulty_level,
+                        )
+                    )
+                    continue
+
+                logger.warning(
+                    "skipping_question_unknown_type",
+                    question_id=getattr(question, "question_id", None),
+                    question_type=getattr(question, "question_type", None),
+                )
+
+        structured_generated = sum(
+            1 for q in question_set.questions if q.question_type is QuestionType.STRUCTURED
+        )
+        non_structured_generated = sum(
+            1
+            for q in question_set.questions
+            if q.question_type is QuestionType.NON_STRUCTURED
+        )
         logger.info(
             "all_questions_generated",
             structured_count=structured_generated,
@@ -788,12 +669,7 @@ class GenerateQnAService:
             )
 
             # Publish audit events (best-effort)
-            # Determine prompt version used (prefer structured path version)
-            actual_prompt_version = (
-                structured_prompt_version
-                or non_structured_prompt_version
-                or "qa-gen/unknown@v0"
-            )
+            actual_prompt_version = prompt_version
 
             try:
                 await self._event_publisher.publish_decision_audit(
@@ -946,314 +822,371 @@ class GenerateQnAService:
         selected_count = min(total_count, len(all_subtopics))
         return all_subtopics[:selected_count]
 
-    def _to_domain_question(self, draft: QuestionDraft) -> DomainQuestion:
+    def _assessment_question_to_domain_question(
+        self,
+        question: Any,
+        *,
+        difficulty_level: DifficultyLevel | None,
+    ) -> DomainQuestion:
+        """Convert a non-structured assessment question into a domain question."""
+        question_text = question.question_text or question.content
+        answer_text = (
+            question.answer_text
+            or question.structured_answer
+            or question.non_structured_model_answer
+        )
+
+        if not question_text or not answer_text:
+            raise GenerationError(
+                "Assessment Generator returned invalid non-structured question",
+                model=self._llm_provider.model_id,
+                question_id=getattr(question, "question_id", None),
+            )
+
+        metadata_source = question.metadata or {}
+        metadata: dict[str, str] = {
+            key: str(value) for key, value in metadata_source.items()
+        }
+        topic_value = metadata_source.get("topic") or metadata_source.get(
+            "topic_id", ""
+        )
+        source_chunk_ids = metadata_source.get("source_chunk_ids", [])
+        references = [str(chunk_id) for chunk_id in source_chunk_ids] if isinstance(
+            source_chunk_ids, list
+        ) else []
 
         return DomainQuestion(
             id=QuestionId.generate(),
-            text=draft.question_text,
-            question_type=draft.question_type,
-            difficulty_level=draft.difficulty_level,
-            topic_id=draft.topic_id,
-            metadata=draft.metadata,
+            text=question_text,
+            question_type=QuestionType.NON_STRUCTURED,
+            difficulty_level=difficulty_level,
+            topic_id=str(topic_value) if topic_value else None,
+            metadata=metadata,
             answer=Answer(
                 id=AnswerId.generate(),
-                text=draft.answer_text,
-                explanation=draft.explanation,
-                references=draft.references,
+                text=answer_text,
+                explanation=question.explanation,
+                references=references,
             ),
         )
 
-    async def _generate_structured_three_prompt(
+    async def _generate_assessment_questions(
         self,
         *,
         context: AssessmentContext,
-        count: int,
+        structured_count: int,
+        non_structured_count: int,
         difficulty_level: DifficultyLevel | None,
         correlation_id: str,
-    ) -> tuple[list[DomainQuestion], str]:
-        """Generate structured questions using 3-prompt workflow.
-
-        1. Assessment Generator: Generate question stems
-        2. MCQ Answer Generator: Generate MCQ answers with distractors
-        3. MCQ Explanation Generator: Generate detailed explanations
-
-        Returns:
-            Tuple of (questions, prompt_version) where prompt_version is the
-            version string of the Assessment Generator prompt used.
-        """
+    ) -> tuple[list[Any], str]:
+        """Generate a mixed batch of assessment questions."""
         from qna_generation_agent.infrastructure.llm.prompt_builder import (
-            AssessmentGeneratorInputSchema,
             AssessmentGeneratorOutputSchema,
-            MCQAnswerGeneratorOutputSchema,
-            MCQAnswerInputSchema,
-            MCQExplanationInputSchema,
-            MCQExplanationOutputSchema,
+            format_chunks_for_prompt,
+        )
+        from qna_generation_agent.infrastructure.llm.user_prompt_builder import (
+            UserPromptBuilder,
         )
 
-        if self._prompt_provider is None:
-            raise GenerationError("Prompt provider required for 3-prompt workflow")
+        if structured_count == 0 and non_structured_count == 0:
+            logger.info("skipping_question_generation", count=0)
+            return [], "qa-gen/unknown@v0"
 
-        # Step 1: Assessment Generator - Generate question stems
-        logger.info("prompt_1_assessment_generator_started", count=count)
-
-        prompt_obj = await self._prompt_provider.get_prompt(
-            "Assessment Generator",
-            label=self._prompt_provider.default_label,
+        prompt_version = (
+            f"Assessment Generator@{self._prompt_provider.default_label}"
+            if self._prompt_provider is not None
+            else "Assessment Generator@legacy"
         )
 
-        # Debug: Log prompt metadata only
+        system_msg = (
+            await self._prompt_provider.get_system_prompt(
+                "Assessment Generator",
+                label=self._prompt_provider.default_label,
+            )
+            if self._prompt_provider is not None
+            else DEFAULT_ASSESSMENT_SYSTEM_PROMPT
+        )
+
+        user_prompt_builder = UserPromptBuilder()
+        user_msg = user_prompt_builder.build_assessment_generator_prompt(
+            structured_count=structured_count,
+            non_structured_count=non_structured_count,
+            difficulty=difficulty_level or "medium",
+            topics=", ".join(context.topic_ids),
+            chunks=format_chunks_for_prompt(context.chunks),
+        )
+
+        logger.info(
+            "llm_generate_assessment_started",
+            structured_count=structured_count,
+            non_structured_count=non_structured_count,
+            difficulty=difficulty_level,
+            correlation_id=correlation_id,
+            model_tier="expensive",
+        )
         logger.debug(
-            "prompt_1_metadata",
-            prompt_name=prompt_obj.name,
-            prompt_version=prompt_obj.version,
-            is_chat=prompt_obj.is_chat_prompt(),
+            "llm_generate_assessment_prompt_built",
+            prompt_length=len(user_msg),
+            model_tier="expensive",
         )
 
-        input_data = AssessmentGeneratorInputSchema.from_context(
-            context=context,
-            structured_count=count,
-            non_structured_count=0,
-            difficulty_level=difficulty_level,
+        expensive_provider = self._get_provider_for_stage(
+            GenerationStage.ASSESSMENT_GENERATOR
         )
 
-        # Log prompt variables metadata only
-        input_dump = input_data.model_dump()
-        logger.debug(
-            "prompt_1_variables",
-            structured_count=input_dump["structured_count"],
-            non_structured_count=input_dump["non_structured_count"],
-            difficulty=input_dump["difficulty"],
-            topics_count=len(context.topic_ids),
-            chunks_count=len(context.chunks),
-        )
+        # Wrap the LLM call with an overall stage timeout to prevent
+        # indefinite hanging in the generation flow
+        try:
+            async with asyncio.timeout(GENERATION_STAGE_TIMEOUT_SECONDS):
+                result = await expensive_provider.invoke_with_system_and_user(
+                    system_message=system_msg,
+                    user_message=user_msg,
+                    structured_output_model=AssessmentGeneratorOutputSchema,
+                    model_tier="expensive",
+                )
+        except TimeoutError as error:
+            logger.error(
+                "assessment_generation_stage_timeout",
+                timeout_seconds=GENERATION_STAGE_TIMEOUT_SECONDS,
+                correlation_id=correlation_id,
+            )
+            raise LLMTransientError(
+                "Assessment generation stage timed out",
+                retry_after_seconds=30,
+                model=expensive_provider.model_id,
+            ) from error
 
-        compiled = prompt_obj.compile(**input_dump)
-
-        # Log compilation metadata only
-        logger.debug(
-            "prompt_1_compiled",
-            compiled_type=type(compiled).__name__,
-            prompt_name=prompt_obj.name,
-            prompt_version=prompt_obj.version,
-        )
-
-        prompt_str = Prompt.compiled_to_string(compiled)
-
-        logger.debug(
-            "prompt_1_assessment_generator_compiled",
-            prompt_name=prompt_obj.name,
-            prompt_version=prompt_obj.version,
-            prompt_length=len(prompt_str),
-        )
-
-        # Generate initial question stems using expensive provider
-        expensive_provider = self._get_provider_for_stage(GenerationStage.ASSESSMENT_GENERATOR)
-        initial_result = await expensive_provider.invoke_with_schema(
-            prompt_str,
-            structured_output_model=AssessmentGeneratorOutputSchema,
-        )
-
-        if not initial_result or not initial_result.questions:
+        if not result or not result.questions:
             raise GenerationError(
                 "Assessment Generator returned no questions",
                 model=expensive_provider.model_id,
             )
 
-        # Log prompt 1 completion metadata only
         logger.info(
-            "prompt_1_assessment_generator_complete",
-            questions_generated=len(initial_result.questions),
-            question_types=[q.question_type for q in initial_result.questions[:count]],
+            "llm_generate_assessment_complete",
+            generated_count=len(result.questions),
+            question_types=[q.question_type for q in result.questions],
+        )
+        return result.questions, prompt_version
+
+    async def _generate_structured_question_three_prompt(
+        self,
+        *,
+        question: Any,
+        difficulty_level: DifficultyLevel | None,
+        question_index: int | None = None,
+    ) -> DomainQuestion | None:
+        """Complete one structured question using the 3-prompt workflow."""
+        from qna_generation_agent.infrastructure.llm.prompt_builder import (
+            MCQAnswerGeneratorOutputSchema,
+            MCQExplanationOutputSchema,
+            build_system_prompt,
+        )
+        from qna_generation_agent.infrastructure.llm.user_prompt_builder import (
+            UserPromptBuilder,
         )
 
-        # Step 2 & 3: For each structured question, generate MCQ answers and explanations
-        final_questions: list[DomainQuestion] = []
+        user_prompt_builder = UserPromptBuilder()
 
-        for idx, question in enumerate(initial_result.questions[:count]):
-            if question.question_type != "structured":
-                continue
+        logger.debug(
+            "processing_structured_question",
+            question_index=question_index,
+            question_id=question.question_id,
+        )
 
-            logger.debug(
-                "processing_structured_question",
-                question_index=idx,
+        question_stem = question.question_text or question.content
+        if not question_stem:
+            logger.warning(
+                "skipping_question_no_stem",
                 question_id=question.question_id,
             )
+            return None
 
-            # Step 2: MCQ Answer Generator
-            logger.debug("prompt_2_mcq_answer_generator_started", question_index=idx)
+        logger.debug(
+            "prompt_2_mcq_answer_generator_started",
+            question_index=question_index,
+            model_tier="cheap",
+        )
 
-            # Validator ensures question_text/content is set, but mypy doesn't know
-            question_stem = question.question_text or question.content
-            if not question_stem:
-                logger.warning(
-                    "skipping_question_no_stem",
-                    question_id=question.question_id,
-                )
-                continue
-
-            answer_prompt_obj = await self._prompt_provider.get_prompt(
+        answer_system_msg = (
+            await self._prompt_provider.get_system_prompt(
                 "MCQ Answer Generator",
                 label=self._prompt_provider.default_label,
             )
-            answer_input = MCQAnswerInputSchema(
-                question_stem=question_stem,
-                grammar_target="general grammar",  # Could be extracted from metadata
-                difficulty=difficulty_level or "medium",
-                l1_background="Mixed",  # Could be configured
-            )
-            answer_compiled = answer_prompt_obj.compile(**answer_input.model_dump())
-            answer_prompt_str = Prompt.compiled_to_string(answer_compiled)
+            if self._prompt_provider is not None
+            else build_system_prompt(QuestionType.STRUCTURED)
+        )
+        metadata_source = question.metadata or {}
 
-            cheap_provider = self._get_provider_for_stage(GenerationStage.MCQ_ANSWER_GENERATOR)
-            answer_result = await cheap_provider.invoke_with_schema(
-                answer_prompt_str,
-                structured_output_model=MCQAnswerGeneratorOutputSchema,
-            )
+        answer_user_msg = user_prompt_builder.build_mcq_answer_generator_prompt(
+            question_text=question_stem,
+            topic=str(metadata_source.get("topic", "general grammar")),
+            difficulty=difficulty_level or "medium",
+            chunk_content="Mixed",
+        )
 
-            if not answer_result:
-                logger.warning(
-                    "mcq_answer_generator_failed_for_question",
-                    question_index=idx,
-                    question_id=question.question_id,
+        cheap_provider = self._get_provider_for_stage(
+            GenerationStage.MCQ_ANSWER_GENERATOR
+        )
+
+        # Wrap MCQ Answer Generator with stage timeout
+        try:
+            async with asyncio.timeout(GENERATION_STAGE_TIMEOUT_SECONDS):
+                answer_result = await cheap_provider.invoke_with_system_and_user(
+                    system_message=answer_system_msg,
+                    user_message=answer_user_msg,
+                    structured_output_model=MCQAnswerGeneratorOutputSchema,
+                    model_tier="cheap",
                 )
-                continue
-
-            # Log prompt 2 completion metadata only
-            logger.debug(
-                "prompt_2_mcq_answer_generator_complete",
-                question_index=idx,
-                correct_letter=answer_result.correct_answer.option_letter,
-                distractor_count=len(answer_result.distractors),
+        except TimeoutError:
+            logger.warning(
+                "mcq_answer_generator_timeout",
+                question_index=question_index,
+                question_id=question.question_id,
+                timeout_seconds=GENERATION_STAGE_TIMEOUT_SECONDS,
             )
+            return None
 
-            # Step 3: MCQ Explanation Generator
-            logger.debug(
-                "prompt_3_mcq_explanation_generator_started", question_index=idx
+        if not answer_result:
+            logger.warning(
+                "mcq_answer_generator_failed_for_question",
+                question_index=question_index,
+                question_id=question.question_id,
             )
+            return None
 
-            explanation_prompt_obj = await self._prompt_provider.get_prompt(
+        logger.debug(
+            "prompt_2_mcq_answer_generator_complete",
+            question_index=question_index,
+            correct_letter=answer_result.correct_answer.option_letter,
+            distractor_count=len(answer_result.distractors),
+        )
+
+        logger.debug(
+            "prompt_3_mcq_explanation_generator_started",
+            question_index=question_index,
+            model_tier="cheap",
+        )
+
+        explanation_system_msg = (
+            await self._prompt_provider.get_system_prompt(
                 "MCQ Explanation Generator",
                 label=self._prompt_provider.default_label,
             )
-
-            # Build options dict from answer result - preserving actual option letters
-            options_dict: dict[str, str] = {}
-            correct_letter = answer_result.correct_answer.option_letter
-            options_dict[correct_letter] = answer_result.correct_answer.option_text
-            for distractor in answer_result.distractors:
-                options_dict[distractor.option_letter] = distractor.option_text
-
-            explanation_input = MCQExplanationInputSchema(
-                question=answer_result.question_stem,
-                options=dumps(options_dict).decode("utf-8"),
-                correct_answer=answer_result.correct_answer.option_letter,
-                target_audience="mixed L1 students",
-            )
-            explanation_compiled = explanation_prompt_obj.compile(
-                **explanation_input.model_dump()
-            )
-            explanation_prompt_str = Prompt.compiled_to_string(explanation_compiled)
-
-            explanation_provider = self._get_provider_for_stage(
-                GenerationStage.MCQ_EXPLANATION_GENERATOR
-            )
-            explanation_result = await explanation_provider.invoke_with_schema(
-                explanation_prompt_str,
-                structured_output_model=MCQExplanationOutputSchema,
-            )
-
-            if explanation_result:
-                # Log prompt 3 completion metadata only
-                logger.debug(
-                    "prompt_3_mcq_explanation_generator_complete",
-                    question_index=idx,
-                    cefr_level=explanation_result.cefr_level,
-                    option_count=len(explanation_result.option_explanations),
-                )
-            else:
-                logger.warning(
-                    "mcq_explanation_generator_failed_for_question",
-                    question_index=idx,
-                )
-
-            # Combine all results into final question
-            # Build clear MCQ options display preserving actual option letters
-            correct_letter = answer_result.correct_answer.option_letter
-            combined_answer_parts = [
-                f"Question: {answer_result.question_stem}",
-                "",
-                "Options:",
-            ]
-            # Sort by letter for consistent display while preserving actual letters
-            for letter in sorted(options_dict.keys()):
-                text = options_dict[letter]
-                marker = " ✓ CORRECT" if letter == correct_letter else ""
-                combined_answer_parts.append(f"  {letter}) {text}{marker}")
-            combined_answer_parts.append("")
-            combined_answer_parts.append(f"Correct Answer: {correct_letter}")
-            combined_answer = "\n".join(combined_answer_parts)
-
-            # Build explanation from explanation_result if available
-            explanation_parts = []
-            if explanation_result:
-                explanation_parts.append(
-                    f"Analysis: {explanation_result.question_analysis}"
-                )
-                explanation_parts.append(f"CEFR Level: {explanation_result.cefr_level}")
-                explanation_parts.append(
-                    f"Teaching Tip: {explanation_result.teaching_tip}"
-                )
-                for opt_exp in explanation_result.option_explanations:
-                    explanation_parts.append(
-                        f"{opt_exp.option_letter}: {opt_exp.explanation}"
-                    )
-            else:
-                # Fallback to answer generator explanation
-                explanation_parts.append(answer_result.correct_answer.explanation)
-                for distractor in answer_result.distractors:
-                    explanation_parts.append(
-                        f"{distractor.option_letter}: {distractor.explanation}"
-                    )
-
-            combined_explanation = "\n".join(explanation_parts)
-
-            # Create final domain question
-            topic_value = question.metadata.get("topic", "")
-            topic_id_str = str(topic_value) if topic_value else None
-
-            # Build metadata dict with string values only
-            metadata_dict: dict[str, str] = {
-                "original_question_id": question.question_id,
-                "grammar_point": answer_result.grammar_point_tested,
-                "l1_considerations": ", ".join(answer_result.l1_considerations),
-            }
-            # Add other metadata from question, converting to strings
-            for key, value in question.metadata.items():
-                if key not in metadata_dict and isinstance(
-                    value, (str, int, float, bool)
-                ):
-                    metadata_dict[key] = str(value)
-
-            final_question = DomainQuestion(
-                id=QuestionId.generate(),
-                text=answer_result.question_stem,
-                question_type=QuestionType.STRUCTURED,
-                difficulty_level=difficulty_level,
-                topic_id=topic_id_str,
-                metadata=metadata_dict,
-                answer=Answer(
-                    id=AnswerId.generate(),
-                    text=combined_answer,
-                    explanation=combined_explanation,
-                    references=[],
-                ),
-            )
-            final_questions.append(final_question)
-
-        logger.info(
-            "three_prompt_workflow_complete",
-            total_questions_generated=len(final_questions),
+            if self._prompt_provider is not None
+            else build_system_prompt(QuestionType.STRUCTURED)
         )
-        # Build dynamic prompt version from actual prompt used
-        prompt_version_str = f"{prompt_obj.name}@v{prompt_obj.version}"
-        return final_questions, prompt_version_str
+
+        options_dict: dict[str, str] = {}
+        correct_letter = answer_result.correct_answer.option_letter
+        options_dict[correct_letter] = answer_result.correct_answer.option_text
+        for distractor in answer_result.distractors:
+            options_dict[distractor.option_letter] = distractor.option_text
+
+        explanation_user_msg = user_prompt_builder.build_mcq_explanation_generator_prompt(
+            question_text=answer_result.question_stem,
+            topic="mixed L1 students",
+            correct_answer=answer_result.correct_answer.option_letter,
+            option_a=options_dict.get("A", ""),
+            option_b=options_dict.get("B", ""),
+            option_c=options_dict.get("C", ""),
+            option_d=options_dict.get("D", ""),
+            chunk_content="mixed L1 students",
+        )
+
+        explanation_provider = self._get_provider_for_stage(
+            GenerationStage.MCQ_EXPLANATION_GENERATOR
+        )
+
+        # Wrap MCQ Explanation Generator with stage timeout
+        try:
+            async with asyncio.timeout(GENERATION_STAGE_TIMEOUT_SECONDS):
+                explanation_result = await explanation_provider.invoke_with_system_and_user(
+                    system_message=explanation_system_msg,
+                    user_message=explanation_user_msg,
+                    structured_output_model=MCQExplanationOutputSchema,
+                    model_tier="cheap",
+                )
+        except TimeoutError:
+            logger.warning(
+                "mcq_explanation_generator_timeout",
+                question_index=question_index,
+                question_id=question.question_id,
+                timeout_seconds=GENERATION_STAGE_TIMEOUT_SECONDS,
+            )
+            explanation_result = None
+
+        if explanation_result:
+            logger.debug(
+                "prompt_3_mcq_explanation_generator_complete",
+                question_index=question_index,
+                cefr_level=explanation_result.cefr_level,
+                option_count=len(explanation_result.option_explanations),
+            )
+        else:
+            logger.warning(
+                "mcq_explanation_generator_failed_for_question",
+                question_index=question_index,
+            )
+
+        combined_answer_parts = [
+            f"Question: {answer_result.question_stem}",
+            "",
+            "Options:",
+        ]
+        for letter in sorted(options_dict.keys()):
+            text = options_dict[letter]
+            marker = " ✓ CORRECT" if letter == correct_letter else ""
+            combined_answer_parts.append(f"  {letter}) {text}{marker}")
+        combined_answer_parts.append("")
+        combined_answer_parts.append(f"Correct Answer: {correct_letter}")
+        combined_answer = "\n".join(combined_answer_parts)
+
+        explanation_parts: list[str] = []
+        if explanation_result:
+            explanation_parts.append(
+                f"Analysis: {explanation_result.question_analysis}"
+            )
+            explanation_parts.append(f"CEFR Level: {explanation_result.cefr_level}")
+            explanation_parts.append(
+                f"Teaching Tip: {explanation_result.teaching_tip}"
+            )
+            for opt_exp in explanation_result.option_explanations:
+                explanation_parts.append(
+                    f"{opt_exp.option_letter}: {opt_exp.explanation}"
+                )
+        else:
+            explanation_parts.append(answer_result.correct_answer.explanation)
+            for distractor in answer_result.distractors:
+                explanation_parts.append(
+                    f"{distractor.option_letter}: {distractor.explanation}"
+                )
+
+        combined_explanation = "\n".join(explanation_parts)
+
+        topic_value = metadata_source.get("topic", "")
+        topic_id_str = str(topic_value) if topic_value else None
+
+        metadata_dict: dict[str, str] = {
+            "original_question_id": question.question_id,
+            "grammar_point": answer_result.grammar_point_tested,
+            "l1_considerations": ", ".join(answer_result.l1_considerations),
+        }
+        for key, value in metadata_source.items():
+            if key not in metadata_dict and isinstance(value, (str, int, float, bool)):
+                metadata_dict[key] = str(value)
+
+        return DomainQuestion(
+            id=QuestionId.generate(),
+            text=answer_result.question_stem,
+            question_type=QuestionType.STRUCTURED,
+            difficulty_level=difficulty_level,
+            topic_id=topic_id_str,
+            metadata=metadata_dict,
+            answer=Answer(
+                id=AnswerId.generate(),
+                text=combined_answer,
+                explanation=combined_explanation,
+                references=[],
+            ),
+        )

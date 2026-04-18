@@ -22,7 +22,14 @@ def _format_variable(value: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Prompt:
-    """A fetched prompt with metadata."""
+    """A fetched prompt with metadata.
+
+    This dataclass represents a complete prompt from a prompt management
+    system such as Langfuse. It may contain either text or chat messages.
+
+    For static system prompts, use PromptProvider.get_system_prompt(), which
+    returns plain text directly.
+    """
 
     name: str
     version: int
@@ -138,7 +145,7 @@ class Prompt:
 
 
 class PromptProvider(ABC):
-    """Port for fetching prompts from a prompt management system."""
+    """Port for fetching system prompts from a prompt management system."""
 
     @property
     @abstractmethod
@@ -146,14 +153,20 @@ class PromptProvider(ABC):
         """Return the default label for prompt fetches (e.g., 'production')."""
 
     @abstractmethod
-    async def get_prompt(
+    async def get_system_prompt(
         self,
         name: str,
         *,
         label: str | None = None,
         version: int | None = None,
-    ) -> Prompt:
-        """Fetch a prompt by name.
+    ) -> str:
+        """Fetch a system prompt from Langfuse.
+
+        System prompts are static text without variables. They define the
+        role, output format rules, and quality guidelines for the LLM.
+
+        For chat prompts, extracts the first 'system' role message content.
+        For text prompts, returns the prompt_text directly.
 
         Args:
             name: The prompt name/identifier.
@@ -161,7 +174,7 @@ class PromptProvider(ABC):
             version: Optional specific version number.
 
         Returns:
-            The fetched prompt.
+            The system prompt text (plain string, no variable substitution).
 
         Raises:
             StoragePermanentError: If the prompt doesn't exist.

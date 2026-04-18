@@ -337,9 +337,13 @@ class TestMCQExplanationOutputSchema:
             option_explanations=explanations,
             teaching_tip="Focus on article rules",
             cefr_level="B1",
+            related_grammar=["definite article", "indefinite article"],
+            common_errors=["omitting articles", "using wrong article"],
         )
         assert len(output.option_explanations) == 4
         assert output.cefr_level == "B1"
+        assert output.related_grammar == ["definite article", "indefinite article"]
+        assert output.common_errors == ["omitting articles", "using wrong article"]
 
     def test_invalid_cefr_level(self) -> None:
         with pytest.raises(ValidationError):
@@ -382,20 +386,29 @@ class TestMCQExplanationInputSchema:
 
     def test_valid_input(self) -> None:
         inp = MCQExplanationInputSchema(
-            question="What is the answer?",
-            options='{"A": "opt1", "B": "opt2"}',
+            question_text="What is the answer?",
+            topic="article usage",
+            option_a="opt1",
+            option_b="opt2",
+            option_c="opt3",
+            option_d="opt4",
             correct_answer="A",
-            target_audience="Chinese L1 students",
+            chunk_content="Chinese L1 students",
         )
         assert inp.correct_answer == "A"
+        assert inp.option_a == "opt1"
 
     def test_invalid_correct_answer(self) -> None:
         with pytest.raises(ValidationError):
             MCQExplanationInputSchema(
-                question="Q?",
-                options='{"A": "a"}',
+                question_text="Q?",
+                topic="grammar",
+                option_a="a",
+                option_b="b",
+                option_c="c",
+                option_d="d",
                 correct_answer="E",  # Invalid
-                target_audience="Students",
+                chunk_content="Students",
             )
 
 
@@ -405,20 +418,21 @@ class TestMCQAnswerInputSchema:
 
     def test_valid_input(self) -> None:
         inp = MCQAnswerInputSchema(
-            question_stem="The cat sat on ___ mat.",
-            grammar_target="article usage",
+            question_text="The cat sat on ___ mat.",
+            topic="article usage",
             difficulty="medium",
-            l1_background="Chinese",
+            chunk_content="Chinese",
         )
-        assert inp.l1_background == "Chinese"
+        assert inp.chunk_content == "Chinese"
+        assert inp.topic == "article usage"
 
     def test_invalid_difficulty(self) -> None:
         with pytest.raises(ValidationError):
             MCQAnswerInputSchema(
-                question_stem="Question?",
-                grammar_target="tense",
+                question_text="Question?",
+                topic="tense",
                 difficulty="expert",  # Invalid
-                l1_background="Mixed",
+                chunk_content="Mixed",
             )
 
 
@@ -467,3 +481,116 @@ class TestMCQAnswerGeneratorOutputSchema:
         )
         assert len(output.distractors) == 3
         assert output.grammar_point_tested == "definite article usage"
+
+
+@pytest.mark.unit
+class TestOptionalMetadataFields:
+    """Tests for optional metadata fields in output schemas."""
+
+    def test_mcq_answer_with_optional_fields_absent(self) -> None:
+        """MCQAnswerGeneratorOutputSchema accepts missing optional fields."""
+        output = MCQAnswerGeneratorOutputSchema(
+            question_stem="Test?",
+            correct_answer=MCQDistractorExplanationSchema(
+                option_letter="A",
+                option_text="Correct",
+                is_correct=True,
+                explanation="Correct answer",
+            ),
+            distractors=[
+                MCQDistractorExplanationSchema(
+                    option_letter="B",
+                    option_text="Wrong",
+                    is_correct=False,
+                    explanation="Wrong answer",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="C",
+                    option_text="Wrong",
+                    is_correct=False,
+                    explanation="Wrong answer",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="D",
+                    option_text="Wrong",
+                    is_correct=False,
+                    explanation="Wrong answer",
+                ),
+            ],
+            grammar_point_tested="test",
+            difficulty_justification="test",
+        )
+        assert output.grammar_points == []
+        assert output.cefr_level is None
+        assert output.l1_considerations == []
+
+    def test_mcq_explanation_with_optional_fields_absent(self) -> None:
+        """MCQExplanationOutputSchema accepts missing optional fields."""
+        output = MCQExplanationOutputSchema(
+            question_analysis="Analysis",
+            option_explanations=[
+                MCQDistractorExplanationSchema(
+                    option_letter="A",
+                    option_text="A",
+                    is_correct=True,
+                    explanation="Correct",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="B",
+                    option_text="B",
+                    is_correct=False,
+                    explanation="No",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="C",
+                    option_text="C",
+                    is_correct=False,
+                    explanation="No",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="D",
+                    option_text="D",
+                    is_correct=False,
+                    explanation="No",
+                ),
+            ],
+            teaching_tip="Tip",
+        )
+        assert output.cefr_level is None
+        assert output.related_grammar == []
+        assert output.common_errors == []
+
+    def test_mcq_explanation_with_cefr_level(self) -> None:
+        """MCQExplanationOutputSchema accepts valid CEFR level."""
+        output = MCQExplanationOutputSchema(
+            question_analysis="Analysis",
+            option_explanations=[
+                MCQDistractorExplanationSchema(
+                    option_letter="A",
+                    option_text="A",
+                    is_correct=True,
+                    explanation="Correct",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="B",
+                    option_text="B",
+                    is_correct=False,
+                    explanation="No",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="C",
+                    option_text="C",
+                    is_correct=False,
+                    explanation="No",
+                ),
+                MCQDistractorExplanationSchema(
+                    option_letter="D",
+                    option_text="D",
+                    is_correct=False,
+                    explanation="No",
+                ),
+            ],
+            teaching_tip="Tip",
+            cefr_level="B1",
+        )
+        assert output.cefr_level == "B1"

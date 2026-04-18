@@ -168,6 +168,8 @@ def _build_llm(settings: Settings, model_id: str) -> LLMProvider:
         timeout_seconds=settings.llm_timeout_seconds,
         max_tokens=settings.openai_max_output_tokens,
         temperature=settings.openai_temperature,
+        cheap_model_id=settings.cheap_model_id if settings.cheap_model_enabled else None,
+        expensive_model_id=settings.expensive_model_id,
     )
 
 
@@ -213,11 +215,13 @@ def _build_prompt_provider(settings: Settings) -> PromptProvider | None:
 def _build_prompt_test_service(
     settings: Settings,
     prompt_provider: PromptProvider | None,
+    llm_provider: LLMProvider | None,
 ) -> PromptTestService | None:
     """Build prompt test service if Langfuse is available.
 
-    The PromptTestService requires a prompt provider (Langfuse) to function.
-    It is only available when ENABLE_TEST_ROUTES is true and Langfuse is configured.
+    The PromptTestService requires a prompt provider (Langfuse) and an LLM
+    provider to function. It is only available when ENABLE_TEST_ROUTES is
+    true and both providers are configured.
     """
     if not settings.enable_test_routes:
         return None
@@ -226,18 +230,18 @@ def _build_prompt_test_service(
         logger.info("prompt_test_service_disabled", reason="langfuse_not_configured")
         return None
 
+    if llm_provider is None:
+        logger.info("prompt_test_service_disabled", reason="llm_not_configured")
+        return None
+
     from qna_generation_agent.application.services.prompt_test_service import (
         PromptTestService,
     )
 
     return PromptTestService(
-        model_id=settings.model_id,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        timeout_seconds=settings.llm_timeout_seconds,
+        llm_provider=llm_provider,
         prompt_provider=prompt_provider,
-        cheap_model_id=settings.cheap_model_id if settings.cheap_model_enabled else None,
-        expensive_model_id=settings.expensive_model_id,
+        timeout_seconds=settings.llm_timeout_seconds,
     )
 
 
@@ -316,7 +320,7 @@ def _build_container(settings: Settings) -> ApplicationContainer:
         )
 
     # Build prompt test service for development/testing endpoints
-    prompt_test_service = _build_prompt_test_service(settings, prompt_provider)
+    prompt_test_service = _build_prompt_test_service(settings, prompt_provider, llm_provider)
 
     return ApplicationContainer(
         settings=settings,

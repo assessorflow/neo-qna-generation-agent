@@ -45,6 +45,19 @@ from qna_generation_agent.infrastructure.llm.prompt_builder import (
 logger = get_logger(__name__)
 
 
+def _make_agent_key(model_id: str, system_prompt: str) -> str:
+    """Create a cache key for agent lookup.
+
+    Args:
+        model_id: The model identifier.
+        system_prompt: The system prompt content.
+
+    Returns:
+        A unique key for agent caching.
+    """
+    return f"{model_id}:{hash(system_prompt) & 0xFFFFFFFF:08x}"
+
+
 def _parse_difficulty(value: str | None) -> DifficultyLevel | None:
     """Parse difficulty string to enum."""
     if value is None:
@@ -68,6 +81,8 @@ class StrandsLLMProvider(LLMProvider):
         timeout_seconds: int,
         max_tokens: int = 4096,
         temperature: float = 0.2,
+        cheap_model_id: str | None = None,
+        expensive_model_id: str | None = None,
     ) -> None:
         if model_provider != "openai":
             raise LLMPermanentError(
@@ -82,7 +97,13 @@ class StrandsLLMProvider(LLMProvider):
         self._api_key = api_key
         self._base_url = base_url
 
-        # Initialize Strands OpenAIModel
+        # Determine model IDs with fallback to main model_id
+        cheap_id = cheap_model_id if cheap_model_id else model_id
+        expensive_id = expensive_model_id if expensive_model_id else model_id
+        self._cheap_model_id = cheap_id
+        self._expensive_model_id = expensive_id
+
+        # Initialize Strands OpenAIModel for default (main) tier
         self._model = OpenAIModel(
             client_args={
                 "api_key": api_key,
@@ -94,13 +115,41 @@ class StrandsLLMProvider(LLMProvider):
                 "temperature": temperature,
             },
         )
+
+        # Initialize tier-specific models
+        self._cheap_model = OpenAIModel(
+            client_args={
+                "api_key": api_key,
+                "base_url": base_url,
+            },
+            model_id=cheap_id,
+            params={
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+
+        self._expensive_model = OpenAIModel(
+            client_args={
+                "api_key": api_key,
+                "base_url": base_url,
+            },
+            model_id=expensive_id,
+            params={
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+
         self._structured_agent = Agent(
             model=self._model,
             system_prompt=build_system_prompt(QuestionType.STRUCTURED),
+            callback_handler=None,
         )
         self._non_structured_agent = Agent(
             model=self._model,
             system_prompt=build_system_prompt(QuestionType.NON_STRUCTURED),
+            callback_handler=None,
         )
 
         # Create shared AsyncOpenAI client for health checks
@@ -109,6 +158,10 @@ class StrandsLLMProvider(LLMProvider):
             api_key=api_key,
             base_url=base_url,
         )
+
+        # Agent cache for invoke_with_system_and_user to avoid creating
+        # new agents on every request (prevents resource exhaustion)
+        self._agent_cache: dict[str, Agent] = {}
 
     @property
     def model(self) -> OpenAIModel:
@@ -125,70 +178,191 @@ class StrandsLLMProvider(LLMProvider):
         """Return the timeout setting."""
         return self._timeout_seconds
 
-    async def invoke_with_schema[T: BaseModel](
-        self,
-        prompt: str,
-        *,
-        structured_output_model: type[T],
-    ) -> T | None:
-        """Invoke the LLM with a custom schema for testing.
+    def _get_cached_agent(self, model: OpenAIModel, model_id: str, system_prompt: str) -> Agent:
+        """Get or create a cached Agent for the given model and system prompt.
 
         Args:
-            prompt: The prompt to send to the LLM.
-            structured_output_model: The Pydantic model for the response.
+            model: The OpenAI model to use.
+            model_id: The model identifier string.
+            system_prompt: The system prompt content.
 
         Returns:
-            The structured output or None if parsing failed.
+            A cached or newly created Agent instance.
         """
+        cache_key = _make_agent_key(model_id, system_prompt)
+
+        if cache_key not in self._agent_cache:
+            logger.debug(
+                "creating_new_agent",
+                model_id=model_id,
+                cache_key=cache_key,
+            )
+            self._agent_cache[cache_key] = Agent(
+                model=model,
+                system_prompt=system_prompt,
+                callback_handler=None,
+            )
+        else:
+            logger.debug(
+                "reusing_cached_agent",
+                model_id=model_id,
+                cache_key=cache_key,
+            )
+
+        return self._agent_cache[cache_key]
+
+    async def invoke_with_system_and_user[T: BaseModel](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        """Invoke LLM with separate system and user messages.
+
+        Args:
+            system_message: Static system prompt from Langfuse.
+            user_message: Dynamic user prompt built from template.
+            structured_output_model: Pydantic model for response validation.
+            model_tier: Which model to use ("expensive" or "cheap").
+
+        Returns:
+            Parsed structured output or None if failed.
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        # Select model based on tier
+        if model_tier == "cheap":
+            model = self._cheap_model
+            tier_model_id = self._cheap_model_id
+        else:
+            model = self._expensive_model
+            tier_model_id = self._expensive_model_id
+
+        logger.debug(
+            "invoke_with_system_and_user_started",
+            model_tier=model_tier,
+            model_id=tier_model_id,
+            schema=structured_output_model.__name__,
+        )
+
         try:
+            # Use cached agent to avoid resource exhaustion from creating
+            # new agents on every request
+            agent = self._get_cached_agent(model, tier_model_id, system_message)
+
             async with asyncio.timeout(self._timeout_seconds):
-                result = await self._structured_agent.invoke_async(
-                    prompt,
+                result = await agent.invoke_async(
+                    user_message,
                     structured_output_model=structured_output_model,
                 )
+
             structured_output = result.structured_output
             if structured_output is None:
                 logger.warning(
-                    "invoke_with_schema_no_output",
-                    model=self._model_id,
+                    "invoke_with_system_and_user_no_output",
+                    model_tier=model_tier,
+                    model_id=tier_model_id,
                     stop_reason=result.stop_reason
                     if hasattr(result, "stop_reason")
                     else None,
                 )
                 return None
+
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.debug(
+                "invoke_with_system_and_user_complete",
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                execution_time_ms=elapsed_ms,
+                schema=structured_output_model.__name__,
+            )
+
             return cast(T, structured_output)
-        except TimeoutError:
-            logger.warning("invoke_with_schema_timeout")
-            return None
-        except ValidationError as error:
-            # Schema validation failed - LLM returned malformed output
-            logger.error(
-                "invoke_with_schema_validation_error",
-                error_type=type(error).__name__,
-                error=str(error),
-                model=self._model_id,
-                schema_name=structured_output_model.__name__,
-            )
-            return None
-        except (AuthenticationError, NotFoundError) as error:
-            # Permanent errors - don't retry
-            logger.error(
-                "invoke_with_schema_permanent_error",
-                error_type=type(error).__name__,
-                error=str(error),
-            )
-            return None
-        except OpenAIError as error:
-            # Transient OpenAI errors - worth retrying but we're in test mode
+        except TimeoutError as error:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             logger.warning(
-                "invoke_with_schema_openai_error",
+                "invoke_with_system_and_user_timeout",
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                timeout_seconds=self._timeout_seconds,
+                execution_time_ms=elapsed_ms,
+            )
+            raise LLMTransientError(
+                "LLM request timed out",
+                retry_after_seconds=10,
+                model=tier_model_id,
+            ) from error
+        except asyncio.CancelledError:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.warning(
+                "invoke_with_system_and_user_cancelled",
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                execution_time_ms=elapsed_ms,
+            )
+            # Re-raise CancelledError to allow proper task cleanup
+            raise
+        except ValidationError as error:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.error(
+                "invoke_with_system_and_user_validation_error",
                 error_type=type(error).__name__,
                 error=str(error),
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                schema=structured_output_model.__name__,
+                execution_time_ms=elapsed_ms,
             )
-            return None
-        except Exception:
-            logger.exception("invoke_with_schema_unexpected_error")
-            return None
+            raise LLMPermanentError(
+                "LLM returned output that failed schema validation",
+                model=tier_model_id,
+                error=str(error),
+            ) from error
+        except (AuthenticationError, NotFoundError) as error:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.error(
+                "invoke_with_system_and_user_permanent_error",
+                error_type=type(error).__name__,
+                error=str(error),
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                execution_time_ms=elapsed_ms,
+            )
+            raise LLMPermanentError(
+                "LLM request failed permanently",
+                model=tier_model_id,
+                error=str(error),
+            ) from error
+        except OpenAIError as error:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.warning(
+                "invoke_with_system_and_user_openai_error",
+                error_type=type(error).__name__,
+                error=str(error),
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                execution_time_ms=elapsed_ms,
+            )
+            raise LLMTransientError(
+                "LLM request failed temporarily",
+                retry_after_seconds=30,
+                model=tier_model_id,
+            ) from error
+        except Exception as error:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.exception(
+                "invoke_with_system_and_user_unexpected_error",
+                model_tier=model_tier,
+                model_id=tier_model_id,
+                execution_time_ms=elapsed_ms,
+            )
+            raise LLMPermanentError(
+                "LLM request failed unexpectedly",
+                model=tier_model_id,
+                error=str(error),
+            ) from error
 
     async def generate_structured(
         self,

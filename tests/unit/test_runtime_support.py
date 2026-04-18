@@ -139,11 +139,18 @@ class FakeLLMProvider(LLMProvider):
         """Return True for bootstrap tests."""
         return True
 
-    async def invoke_with_schema(
-        self, prompt: str, *, structured_output_model: type[Any]
-    ) -> Any | None:
-        """Invoke LLM with structured output schema - not used in bootstrap tests."""
-        del prompt, structured_output_model
+    async def invoke_with_system_and_user[
+        T: BaseModel
+    ](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        """Invoke LLM with system and user messages - not used in bootstrap tests."""
+        del system_message, user_message, model_tier
         return None
 
 

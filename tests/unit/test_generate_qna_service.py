@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from qna_generation_agent.application.dto import (
     AssessmentContext,
@@ -24,7 +25,6 @@ from qna_generation_agent.application.errors import (
 from qna_generation_agent.application.ports.idempotency import IdempotencyStatus
 from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.application.ports.prompt_provider import (
-    Prompt,
     PromptProvider,
 )
 from qna_generation_agent.application.ports.submission_client import (
@@ -123,10 +123,19 @@ class FakeLLMProvider(LLMProvider):
         """Return True for tests."""
         return True
 
-    async def invoke_with_schema(
-        self, prompt: str, *, structured_output_model: type[Any]
-    ) -> Any | None:
-        """Invoke LLM with structured output schema for 3-prompt workflow."""
+    async def invoke_with_system_and_user[
+        T: BaseModel
+    ](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        """Invoke LLM with system and user messages for 3-prompt workflow."""
+        combined = f"{system_message}\n\n{user_message}"
+
         # Return appropriate mock data based on the schema type
         if structured_output_model == AssessmentGeneratorOutputSchema:
             # Extract count from prompt to return appropriate number of questions
@@ -134,7 +143,9 @@ class FakeLLMProvider(LLMProvider):
             import re
 
             match = re.search(
-                r"(\d+)\s+structured.*?(\d+)\s+non-structured", prompt, re.IGNORECASE
+                r"(\d+)\s+structured.*?(\d+)\s+(?:non-structured|open-ended)",
+                combined,
+                re.IGNORECASE,
             )
             if match:
                 structured_count = int(match.group(1))
@@ -172,9 +183,9 @@ class FakeLLMProvider(LLMProvider):
                         },
                     )
                 )
-            return AssessmentGeneratorOutputSchema(questions=questions)
+            return AssessmentGeneratorOutputSchema(questions=questions)  # type: ignore[return-value]
         if structured_output_model == MCQAnswerGeneratorOutputSchema:
-            return MCQAnswerGeneratorOutputSchema(
+            return MCQAnswerGeneratorOutputSchema(  # type: ignore[return-value]
                 question_stem="Test question stem?",
                 correct_answer=MCQDistractorExplanationSchema(
                     option_letter="A",
@@ -469,14 +480,10 @@ async def test_execute_with_prompt_provider_uses_langfuse() -> None:
         def default_label(self) -> str:
             return "production"
 
-        async def get_prompt(
+        async def get_system_prompt(
             self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> Prompt:
-            return Prompt(
-                name=name,
-                version=1,
-                prompt_text="Test prompt with {structured_generated} questions",
-            )
+        ) -> str:
+            return f"System prompt for {name}"
 
         async def health_check(self) -> bool:
             return True
@@ -875,30 +882,24 @@ async def test_execute_generates_non_structured_only() -> None:
 
 
 @pytest.mark.unit
-async def test_execute_with_prompt_provider_uses_compiled_prompt() -> None:
-    """Test that prompt provider compiles and uses the correct prompt variables."""
+async def test_execute_with_prompt_provider_uses_combined_prompt() -> None:
+    """Test that prompt provider drives the mixed assessment prompt."""
 
     class RecordingPromptProvider(PromptProvider):
-        """Prompt provider that records compilation calls."""
+        """Prompt provider that records system prompt requests."""
 
         def __init__(self) -> None:
-            self.prompts_fetched: list[tuple[str, str | None]] = []
-            self.compiled_prompts: list[tuple[str, dict[str, Any]]] = []
+            self.system_prompts_fetched: list[tuple[str, str | None]] = []
 
         @property
         def default_label(self) -> str:
             return "production"
 
-        async def get_prompt(
+        async def get_system_prompt(
             self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> Prompt:
-            self.prompts_fetched.append((name, label))
-            # Create a prompt with proper double-brace placeholders
-            return Prompt(
-                name=name,
-                version=1,
-                prompt_text="Generate {structured_count} structured and {non_structured_count} non-structured questions. Difficulty: {difficulty}. Topics: {topics}. Chunks: {chunks}.",
-            )
+        ) -> str:
+            self.system_prompts_fetched.append((name, label))
+            return f"System prompt for {name}"
 
         async def health_check(self) -> bool:
             return True
@@ -940,12 +941,13 @@ async def test_execute_with_prompt_provider_uses_compiled_prompt() -> None:
         )
     )
 
-    # Note: With 3-prompt workflow, structured_count may generate fewer questions
-    # than requested due to MCQ assembly complexity. We verify generation succeeded.
-    assert receipt.question_count >= 1
+    assert receipt.question_count == 3
     assert receipt.status == "completed"
-    # Verify prompt provider was called
-    assert len(prompt_provider.prompts_fetched) > 0
+    assert prompt_provider.system_prompts_fetched[0] == (
+        "Assessment Generator",
+        "production",
+    )
+    assert len(prompt_provider.system_prompts_fetched) == 5
 
 
 @pytest.mark.unit
@@ -1091,17 +1093,23 @@ async def test_execute_propagates_trace_id_from_command() -> None:
 async def test_mcq_option_letter_preservation_non_a_correct() -> None:
     """Test that MCQ option letters from answer generator are preserved, even when correct answer is not 'A'."""
     from qna_generation_agent.application.ports.prompt_provider import (
-        Prompt,
         PromptProvider,
     )
 
     # LLM provider that returns C as the correct answer (not A)
     class NonACorrectLLMProvider(FakeLLMProvider):
-        async def invoke_with_schema(
-            self, prompt: str, *, structured_output_model: type[Any]
-        ) -> Any | None:
+        async def invoke_with_system_and_user[
+            T: BaseModel
+        ](
+            self,
+            system_message: str,
+            user_message: str,
+            *,
+            structured_output_model: type[T],
+            model_tier: str = "expensive",
+        ) -> T | None:
             if structured_output_model == AssessmentGeneratorOutputSchema:
-                return AssessmentGeneratorOutputSchema(
+                return AssessmentGeneratorOutputSchema(  # type: ignore[return-value]
                     questions=[
                         AssessmentQuestionSchema(
                             question_id="q-001",
@@ -1118,7 +1126,7 @@ async def test_mcq_option_letter_preservation_non_a_correct() -> None:
                 )
             if structured_output_model == MCQAnswerGeneratorOutputSchema:
                 # Return C as correct answer - this tests letter preservation
-                return MCQAnswerGeneratorOutputSchema(
+                return MCQAnswerGeneratorOutputSchema(  # type: ignore[return-value]
                     question_stem="What is the correct article?",
                     correct_answer=MCQDistractorExplanationSchema(
                         option_letter="C",
@@ -1162,14 +1170,10 @@ async def test_mcq_option_letter_preservation_non_a_correct() -> None:
         def default_label(self) -> str:
             return "production"
 
-        async def get_prompt(
+        async def get_system_prompt(
             self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> Prompt:
-            return Prompt(
-                name=name,
-                version=1,
-                prompt_text=f"Test prompt for {name}",
-            )
+        ) -> str:
+            return f"System prompt for {name}"
 
         async def health_check(self) -> bool:
             return True

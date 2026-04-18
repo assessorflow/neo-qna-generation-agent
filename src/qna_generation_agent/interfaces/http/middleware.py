@@ -7,6 +7,7 @@ from time import perf_counter
 from uuid import uuid4
 
 from blacksheep import Request, Response
+from blacksheep.exceptions import BadRequestFormat
 from blacksheep.server.responses import json
 
 from qna_generation_agent.app.logging import bind_context, clear_context, get_logger
@@ -140,9 +141,26 @@ async def error_middleware(request: Request, handler: Handler) -> Response:
     - IdempotencyConflict -> 409 Conflict
     - TransientError (and subclasses like StorageTransientError, LLMTransientError) -> 503 Service Unavailable
     - PermanentError and other AppError subclasses -> 500 Internal Server Error
+    - BadRequestFormat (malformed JSON, etc.) -> 400 Bad Request
     """
     try:
         return await handler(request)
+    except BadRequestFormat as error:
+        request_id = _get_request_id_from_context() or _resolve_request_id(request)
+        logger.warning(
+            "bad_request_format",
+            method=request.method,
+            path=request.path,
+            error=str(error),
+            request_id=request_id,
+        )
+        return json(
+            ErrorResponse(
+                error="bad_request",
+                request_id=request_id,
+            ).model_dump(mode="json"),
+            status=400,
+        )
     except AppError as error:
         # Use request_id and trace_id from context if available (set by correlation_middleware),
         # otherwise resolve from headers.

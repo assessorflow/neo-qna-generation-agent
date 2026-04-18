@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from langfuse import Langfuse, observe
+from langfuse import Langfuse
 from langfuse.api.commons.errors import (
     AccessDeniedError,
     NotFoundError,
@@ -59,15 +59,14 @@ class LangfusePromptProvider(PromptProvider):
             default_label=default_label,
         )
 
-    @observe(name="get_prompt", as_type="generation")
-    async def get_prompt(
+    async def _fetch_prompt(
         self,
         name: str,
         *,
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch a prompt from Langfuse."""
+        """Internal prompt fetch without deprecation warning."""
         # Bind trace_id to structlog context for correlation
         trace_id = self._client.get_current_trace_id()
         if trace_id:
@@ -216,7 +215,7 @@ class LangfusePromptProvider(PromptProvider):
         version: int | None = None,
     ) -> Prompt:
         """Fetch the Assessment Generator prompt."""
-        return await self.get_prompt(
+        return await self._fetch_prompt(
             self.ASSESSMENT_GENERATOR,
             label=label,
             version=version,
@@ -229,7 +228,7 @@ class LangfusePromptProvider(PromptProvider):
         version: int | None = None,
     ) -> Prompt:
         """Fetch the MCQ Explanation Generator prompt."""
-        return await self.get_prompt(
+        return await self._fetch_prompt(
             self.MCQ_EXPLANATION_GENERATOR,
             label=label,
             version=version,
@@ -242,8 +241,59 @@ class LangfusePromptProvider(PromptProvider):
         version: int | None = None,
     ) -> Prompt:
         """Fetch the MCQ Answer Generator prompt."""
-        return await self.get_prompt(
+        return await self._fetch_prompt(
             self.MCQ_ANSWER_GENERATOR,
             label=label,
             version=version,
         )
+
+    async def get_system_prompt(
+        self,
+        name: str,
+        *,
+        label: str | None = None,
+        version: int | None = None,
+    ) -> str:
+        """Fetch a system prompt from Langfuse.
+
+        For chat prompts, extracts the first 'system' role message content.
+        For text prompts, returns the prompt_text directly.
+
+        Args:
+            name: The prompt name/identifier.
+            label: Optional label (e.g., "production", "latest").
+            version: Optional specific version number.
+
+        Returns:
+            The system prompt text (plain string, no variable substitution).
+
+        Raises:
+            StoragePermanentError: If the prompt doesn't exist.
+            StorageTransientError: If the fetch fails temporarily.
+        """
+        prompt = await self._fetch_prompt(name, label=label, version=version)
+
+        result: str
+        if prompt.is_chat_prompt():
+            # Extract first system message from chat_messages
+            for msg in prompt.chat_messages or []:
+                if msg.get("role") == "system":
+                    result = msg.get("content", "")
+                    break
+            else:
+                # Fallback: return first message content
+                if prompt.chat_messages:
+                    result = prompt.chat_messages[0].get("content", "")
+                else:
+                    result = ""
+        else:
+            result = prompt.prompt_text or ""
+
+        logger.info(
+            "system_prompt_fetched",
+            name=name,
+            version=prompt.version,
+            label=label,
+            is_chat=prompt.is_chat_prompt(),
+        )
+        return result
