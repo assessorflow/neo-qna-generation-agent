@@ -6,6 +6,8 @@ environments. They allow testing of individual prompts via Strands Agent executi
 
 from __future__ import annotations
 
+import asyncio
+
 from blacksheep import Application, FromJSON, Request, Response
 from blacksheep.server.responses import json
 
@@ -24,6 +26,10 @@ from qna_generation_agent.interfaces.http.schemas import (
 )
 
 logger = get_logger(__name__)
+
+# Request-level timeout for prompt test endpoints (slightly longer than LLM timeout)
+# to ensure HTTP layer doesn't hang even if LLM layer has issues
+REQUEST_TIMEOUT_SECONDS = 150
 
 
 def _get_test_service_error(
@@ -146,15 +152,32 @@ def register_prompt_test_routes(app: Application) -> None:
 
         body = request_body.value
 
-        result = await service.test_assessment_generator(
-            structured_count=body.structured_count,
-            non_structured_count=body.non_structured_count,
-            difficulty=body.difficulty,
-            topics=body.topics,
-            chunks=body.chunks,
-        )
-
-        return _make_response(result)
+        try:
+            # Wrap service call with request-level timeout to prevent
+            # HTTP connections from hanging indefinitely
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                result = await service.test_assessment_generator(
+                    structured_count=body.structured_count,
+                    non_structured_count=body.non_structured_count,
+                    difficulty=body.difficulty,
+                    topics=body.topics,
+                    chunks=body.chunks,
+                )
+            return _make_response(result)
+        except TimeoutError:
+            logger.warning(
+                "assessment_generator_request_timeout",
+                request_id=_resolve_request_id(request),
+                timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            )
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(
+                    error=f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s",
+                    request_id=request_id,
+                ).model_dump(mode="json"),
+                status=504,
+            )
 
     @app.router.post("/test/prompt/mcq-answer")
     async def test_mcq_answer_generator(
@@ -170,10 +193,10 @@ def register_prompt_test_routes(app: Application) -> None:
         Example request body (with defaults):
         ```json
         {
-            "question_stem": "The student ____ to school yesterday...",
-            "grammar_target": "past continuous tense",
+            "question_text": "The student ____ to school yesterday...",
+            "topic": "past continuous tense",
             "difficulty": "medium",
-            "l1_background": "Chinese"
+            "chunk_content": "Chinese"
         }
         ```
 
@@ -204,14 +227,29 @@ def register_prompt_test_routes(app: Application) -> None:
 
         body = request_body.value
 
-        result = await service.test_mcq_answer_generator(
-            question_stem=body.question_stem,
-            grammar_target=body.grammar_target,
-            difficulty=body.difficulty,
-            l1_background=body.l1_background,
-        )
-
-        return _make_response(result)
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                result = await service.test_mcq_answer_generator(
+                    question_text=body.question_text,
+                    topic=body.topic,
+                    difficulty=body.difficulty,
+                    chunk_content=body.chunk_content,
+                )
+            return _make_response(result)
+        except TimeoutError:
+            logger.warning(
+                "mcq_answer_generator_request_timeout",
+                request_id=_resolve_request_id(request),
+                timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            )
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(
+                    error=f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s",
+                    request_id=request_id,
+                ).model_dump(mode="json"),
+                status=504,
+            )
 
     @app.router.post("/test/prompt/mcq-explanation")
     async def test_mcq_explanation_generator(
@@ -227,15 +265,14 @@ def register_prompt_test_routes(app: Application) -> None:
         Example request body (with defaults):
         ```json
         {
-            "question": "Choose the correct article: I bought ____ book...",
-            "options": {
-                "A": "a",
-                "B": "an",
-                "C": "the",
-                "D": "(no article)"
-            },
+            "question_text": "Choose the correct article: I bought ____ book...",
+            "topic": "article usage",
+            "option_a": "a",
+            "option_b": "an",
+            "option_c": "the",
+            "option_d": "(no article)",
             "correct_answer": "A",
-            "target_audience": "Chinese L1 students learning English..."
+            "chunk_content": "Chinese L1 students learning English..."
         }
         ```
 
@@ -266,11 +303,30 @@ def register_prompt_test_routes(app: Application) -> None:
 
         body = request_body.value
 
-        result = await service.test_mcq_explanation_generator(
-            question=body.question,
-            options=body.options,
-            correct_answer=body.correct_answer,
-            target_audience=body.target_audience,
-        )
-
-        return _make_response(result)
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                result = await service.test_mcq_explanation_generator(
+                    question_text=body.question_text,
+                    topic=body.topic,
+                    option_a=body.option_a,
+                    option_b=body.option_b,
+                    option_c=body.option_c,
+                    option_d=body.option_d,
+                    correct_answer=body.correct_answer,
+                    chunk_content=body.chunk_content,
+                )
+            return _make_response(result)
+        except TimeoutError:
+            logger.warning(
+                "mcq_explanation_generator_request_timeout",
+                request_id=_resolve_request_id(request),
+                timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            )
+            request_id = _resolve_request_id(request)
+            return json(
+                ErrorResponse(
+                    error=f"Request timed out after {REQUEST_TIMEOUT_SECONDS}s",
+                    request_id=request_id,
+                ).model_dump(mode="json"),
+                status=504,
+            )

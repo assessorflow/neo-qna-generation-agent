@@ -97,25 +97,25 @@ class MCQAnswerGeneratorTestRequest(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    question_stem: str = Field(
+    question_text: str = Field(
         default="The student ____ to school yesterday when it suddenly started raining.",
         min_length=1,
         description="The incomplete MCQ question stem",
     )
-    grammar_target: str = Field(
+    topic: str = Field(
         default="past continuous tense",
         min_length=1,
-        description="The grammar point being tested",
+        description="The grammar point or topic being tested",
     )
     difficulty: str = Field(
         default="medium",
         pattern="^(easy|medium|hard)$",
         description="Target difficulty level",
     )
-    l1_background: str = Field(
+    chunk_content: str = Field(
         default="Chinese",
         min_length=1,
-        description="Target learner L1 background (e.g., Chinese, Vietnamese, Mixed)",
+        description="Source chunk content or target learner L1 background",
     )
 
 
@@ -124,29 +124,45 @@ class MCQExplanationGeneratorTestRequest(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    question: str = Field(
+    question_text: str = Field(
         default="Choose the correct article: I bought ____ book from the bookstore.",
         min_length=1,
         description="The MCQ question stem",
     )
-    options: dict[str, str] = Field(
-        default={
-            "A": "a",
-            "B": "an",
-            "C": "the",
-            "D": "(no article)",
-        },
-        description="Options as {letter: text} mapping",
+    topic: str = Field(
+        default="article usage",
+        min_length=1,
+        description="Topic or target audience description",
+    )
+    option_a: str = Field(
+        default="a",
+        min_length=1,
+        description="Option A text",
+    )
+    option_b: str = Field(
+        default="an",
+        min_length=1,
+        description="Option B text",
+    )
+    option_c: str = Field(
+        default="the",
+        min_length=1,
+        description="Option C text",
+    )
+    option_d: str = Field(
+        default="(no article)",
+        min_length=1,
+        description="Option D text",
     )
     correct_answer: str = Field(
         default="A",
         pattern="^[ABCD]$",
         description="The correct answer letter (A/B/C/D)",
     )
-    target_audience: str = Field(
+    chunk_content: str = Field(
         default="Chinese L1 students learning English in Singapore",
         min_length=1,
-        description="Description of target learners",
+        description="Source chunk content or target audience info",
     )
 
 

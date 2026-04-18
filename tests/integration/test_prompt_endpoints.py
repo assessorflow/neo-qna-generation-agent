@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from blacksheep.contents import JSONContent
 from blacksheep.testing import TestClient
+from pydantic import BaseModel
 
 from qna_generation_agent.app.bootstrap import ApplicationContainer
 from qna_generation_agent.app.settings import LogLevel, RuntimeEnvironment, Settings
@@ -95,11 +96,18 @@ class FakeLLMProvider(LLMProvider):
         """Return True for readiness probe tests."""
         return True
 
-    async def invoke_with_schema(
-        self, prompt: str, *, structured_output_model: type[Any]
-    ) -> Any | None:
-        """Invoke LLM with structured output schema - not used in HTTP tests."""
-        del prompt, structured_output_model
+    async def invoke_with_system_and_user[
+        T: BaseModel
+    ](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        """Invoke LLM with system and user messages - not used in endpoint tests."""
+        del system_message, user_message, model_tier
         return None
 
 
@@ -293,7 +301,7 @@ async def test_mcq_answer_generator_endpoint() -> None:
 
     result = PromptTestResult(
         result={
-            "question_stem": "Test question",
+            "question_text": "Test question",
             "correct_answer": {"option_letter": "A", "option_text": "was walking"},
             "distractors": [
                 {"option_letter": "B", "option_text": "walked"},
@@ -317,7 +325,7 @@ async def test_mcq_answer_generator_endpoint() -> None:
 
         response = await client.post(
             "/test/prompt/mcq-answer",
-            content=JSONContent({"question_stem": "test"}),
+            content=JSONContent({"question_text": "test"}),
         )
 
         assert response.status == 200
@@ -327,9 +335,9 @@ async def test_mcq_answer_generator_endpoint() -> None:
 
         # Verify the request value was passed (we sent "test" in the request)
         call_kwargs = mock_service.test_mcq_answer_generator.call_args.kwargs
-        assert call_kwargs["question_stem"] == "test"
-        # Grammar target should use the default since we didn't provide it
-        assert call_kwargs["grammar_target"] == "past continuous tense"
+        assert call_kwargs["question_text"] == "test"
+        # Topic should use the default since we didn't provide it
+        assert call_kwargs["topic"] == "past continuous tense"
     finally:
         await app.stop()  # type: ignore[no-untyped-call]
 
@@ -366,7 +374,7 @@ async def test_mcq_explanation_generator_endpoint() -> None:
 
         response = await client.post(
             "/test/prompt/mcq-explanation",
-            content=JSONContent({"question": "test"}),
+            content=JSONContent({"question_text": "test"}),
         )
 
         assert response.status == 200
@@ -376,10 +384,10 @@ async def test_mcq_explanation_generator_endpoint() -> None:
 
         # Verify the request value was passed (we sent "test" in the request)
         call_kwargs = mock_service.test_mcq_explanation_generator.call_args.kwargs
-        assert call_kwargs["question"] == "test"
+        assert call_kwargs["question_text"] == "test"
         # Default values should be used for fields not in request
         assert call_kwargs["correct_answer"] == "A"
-        assert "A" in call_kwargs["options"]
+        assert call_kwargs["option_a"] == "a"
     finally:
         await app.stop()  # type: ignore[no-untyped-call]
 

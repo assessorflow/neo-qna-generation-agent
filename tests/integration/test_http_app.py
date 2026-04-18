@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from blacksheep.testing import TestClient
+from pydantic import BaseModel
 
 from qna_generation_agent.app.bootstrap import ApplicationContainer
 from qna_generation_agent.app.lifespan import reset_runtime_state
@@ -73,11 +72,18 @@ class FakeLLMProvider(LLMProvider):
         """Return True for readiness probe tests."""
         return True
 
-    async def invoke_with_schema(
-        self, prompt: str, *, structured_output_model: type[Any]
-    ) -> Any | None:
-        """Invoke LLM with structured output schema - not used in HTTP tests."""
-        del prompt, structured_output_model
+    async def invoke_with_system_and_user[
+        T: BaseModel
+    ](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        """Invoke LLM with system and user messages - not used in HTTP tests."""
+        del system_message, user_message, model_tier
         return None
 
 

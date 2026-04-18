@@ -24,8 +24,10 @@ class FakeAgent:
 
     responses: ClassVar[list[Any]] = []
 
-    def __init__(self, model: object, system_prompt: str) -> None:
-        del model
+    def __init__(
+        self, model: object, system_prompt: str, callback_handler: object = None
+    ) -> None:
+        del model, callback_handler
         self.system_prompt = system_prompt
 
     async def invoke_async(
@@ -332,87 +334,6 @@ async def test_generate_maps_generic_error_to_permanent_error(
             difficulty_level=DifficultyLevel.MEDIUM,
             correlation_id="corr_123",
         )
-
-
-# ============================================================================
-# invoke_with_schema Tests
-# ============================================================================
-
-
-@pytest.mark.unit
-async def test_invoke_with_schema_returns_valid_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that invoke_with_schema returns valid structured output."""
-    from pydantic import BaseModel
-
-    class TestOutputSchema(BaseModel):
-        name: str
-        count: int
-
-    FakeAgent.responses = [
-        SimpleNamespace(structured_output=TestOutputSchema(name="Test", count=42))
-    ]
-    provider = _provider(monkeypatch)
-
-    result = await provider.invoke_with_schema(
-        prompt="Generate test output",
-        structured_output_model=TestOutputSchema,
-    )
-
-    assert result is not None
-    assert result.name == "Test"
-    assert result.count == 42
-
-
-@pytest.mark.unit
-async def test_invoke_with_schema_returns_none_on_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that invoke_with_schema returns None on timeout."""
-    from pydantic import BaseModel
-
-    class TestOutputSchema(BaseModel):
-        name: str
-
-    FakeAgent.responses = [("sleep", 0.05)]  # Simulated timeout
-    provider = _provider(monkeypatch)
-    provider._timeout_seconds = 0  # Force immediate timeout
-
-    result = await provider.invoke_with_schema(
-        prompt="Generate test output",
-        structured_output_model=TestOutputSchema,
-    )
-
-    assert result is None
-
-
-@pytest.mark.unit
-async def test_invoke_with_schema_returns_none_on_auth_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that invoke_with_schema returns None on auth error."""
-    from openai import AuthenticationError
-    from pydantic import BaseModel
-
-    class TestOutputSchema(BaseModel):
-        name: str
-
-    FakeAgent.responses = [
-        AuthenticationError(
-            "Invalid API key",
-            response=MagicMock(),
-            body={"error": {"message": "Invalid API key"}},
-        )
-    ]
-    provider = _provider(monkeypatch)
-
-    result = await provider.invoke_with_schema(
-        prompt="Generate test output",
-        structured_output_model=TestOutputSchema,
-    )
-
-    assert result is None
 
 
 # ============================================================================

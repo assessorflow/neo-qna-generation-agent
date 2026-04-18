@@ -1,4 +1,4 @@
-"""Service for testing individual Langfuse prompts via Strands Agent execution."""
+"""Service for testing individual Langfuse prompts via LLM execution."""
 
 from __future__ import annotations
 
@@ -6,16 +6,17 @@ import asyncio
 import time
 from typing import Any
 
-from strands import Agent
-from strands.models.openai import OpenAIModel
-
 from qna_generation_agent.app.logging import get_logger
+from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.application.ports.prompt_provider import PromptProvider
 from qna_generation_agent.infrastructure.llm.prompt_builder import (
     AssessmentGeneratorOutputSchema,
     MCQAnswerGeneratorOutputSchema,
     MCQExplanationOutputSchema,
     format_chunks_for_prompt,
+)
+from qna_generation_agent.infrastructure.llm.user_prompt_builder import (
+    UserPromptBuilder,
 )
 
 logger = get_logger(__name__)
@@ -41,52 +42,26 @@ class PromptTestResult:
 
 
 class PromptTestService:
-    """Test service for executing single prompts via Strands Agent with structured output."""
+    """Test service for executing single prompts with separated system/user messages."""
 
     def __init__(
         self,
         *,
-        model_id: str,
-        api_key: str,
-        base_url: str | None,
-        timeout_seconds: int,
+        llm_provider: LLMProvider,
         prompt_provider: PromptProvider,
-        cheap_model_id: str | None = None,
-        expensive_model_id: str | None = None,
+        timeout_seconds: int,
     ) -> None:
-        """Initialize the prompt test service."""
-        self._model_id = model_id
-        self._timeout_seconds = timeout_seconds
+        """Initialize the prompt test service.
+
+        Args:
+            llm_provider: LLM provider for invoking with system/user separation.
+            prompt_provider: Prompt provider for fetching system prompts.
+            timeout_seconds: Timeout for LLM invocations.
+        """
+        self._llm_provider = llm_provider
         self._prompt_provider = prompt_provider
-
-        # Determine model IDs with fallback to main model_id
-        cheap_id = cheap_model_id if cheap_model_id else model_id
-        expensive_id = expensive_model_id if expensive_model_id else model_id
-
-        # Initialize Strands OpenAIModel instances for different tiers
-        self._cheap_model = OpenAIModel(
-            client_args={
-                "api_key": api_key,
-                "base_url": base_url,
-            },
-            model_id=cheap_id,
-            params={
-                "max_tokens": 4000,
-                "temperature": 0.7,
-            },
-        )
-
-        self._expensive_model = OpenAIModel(
-            client_args={
-                "api_key": api_key,
-                "base_url": base_url,
-            },
-            model_id=expensive_id,
-            params={
-                "max_tokens": 4000,
-                "temperature": 0.7,
-            },
-        )
+        self._timeout_seconds = timeout_seconds
+        self._user_prompt_builder = UserPromptBuilder()
 
     async def test_assessment_generator(
         self,
@@ -102,14 +77,14 @@ class PromptTestService:
         prompt_version = "unknown"
 
         try:
-            prompt_obj = await self._prompt_provider.get_prompt(
+            system_msg = await self._prompt_provider.get_system_prompt(
                 "Assessment Generator",
                 label=self._prompt_provider.default_label,
             )
 
             chunks_formatted = format_chunks_for_prompt(chunks)
 
-            compiled = prompt_obj.compile(
+            user_msg = self._user_prompt_builder.build_assessment_generator_prompt(
                 structured_count=structured_count,
                 non_structured_count=non_structured_count,
                 difficulty=difficulty,
@@ -117,25 +92,21 @@ class PromptTestService:
                 chunks=chunks_formatted,
             )
 
-            prompt_str = str(compiled)
-            prompt_version = prompt_obj.version_string
-
-            agent = Agent(
-                model=self._expensive_model,
-                system_prompt="You are an expert assessment generator for ELP (English Language Proficiency) assessments targeting foreign students in Singapore.",
-            )
+            prompt_version = f"Assessment Generator@{self._prompt_provider.default_label}"
 
             async with asyncio.timeout(self._timeout_seconds):
-                result = await agent.invoke_async(
-                    prompt_str,
+                result = await self._llm_provider.invoke_with_system_and_user(
+                    system_message=system_msg,
+                    user_message=user_msg,
                     structured_output_model=AssessmentGeneratorOutputSchema,
+                    model_tier="expensive",
                 )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
             result_dict = (
-                result.structured_output.model_dump(mode="json")
-                if result and result.structured_output
+                result.model_dump(mode="json")
+                if result is not None
                 else None
             )
 
@@ -176,47 +147,43 @@ class PromptTestService:
     async def test_mcq_answer_generator(
         self,
         *,
-        question_stem: str,
-        grammar_target: str,
+        question_text: str,
+        topic: str,
         difficulty: str,
-        l1_background: str,
+        chunk_content: str,
     ) -> PromptTestResult:
         """Test the MCQ Answer Generator prompt with structured output."""
         start_time = time.monotonic()
         prompt_version = "unknown"
 
         try:
-            prompt_obj = await self._prompt_provider.get_prompt(
+            system_msg = await self._prompt_provider.get_system_prompt(
                 "MCQ Answer Generator",
                 label=self._prompt_provider.default_label,
             )
 
-            compiled = prompt_obj.compile(
-                question_text=question_stem,
-                topic=grammar_target,
+            user_msg = self._user_prompt_builder.build_mcq_answer_generator_prompt(
+                question_text=question_text,
+                topic=topic,
                 difficulty=difficulty,
-                chunk_content=l1_background,
+                chunk_content=chunk_content,
             )
 
-            prompt_str = str(compiled)
-            prompt_version = prompt_obj.version_string
-
-            agent = Agent(
-                model=self._cheap_model,
-                system_prompt="You are an expert at creating MCQ answer options with L1-targeted distractors for English Language Proficiency assessments.",
-            )
+            prompt_version = f"MCQ Answer Generator@{self._prompt_provider.default_label}"
 
             async with asyncio.timeout(self._timeout_seconds):
-                result = await agent.invoke_async(
-                    prompt_str,
+                result = await self._llm_provider.invoke_with_system_and_user(
+                    system_message=system_msg,
+                    user_message=user_msg,
                     structured_output_model=MCQAnswerGeneratorOutputSchema,
+                    model_tier="cheap",
                 )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
             result_dict = (
-                result.structured_output.model_dump(mode="json")
-                if result and result.structured_output
+                result.model_dump(mode="json")
+                if result is not None
                 else None
             )
 
@@ -257,51 +224,51 @@ class PromptTestService:
     async def test_mcq_explanation_generator(
         self,
         *,
-        question: str,
-        options: dict[str, str],
+        question_text: str,
+        topic: str,
+        option_a: str,
+        option_b: str,
+        option_c: str,
+        option_d: str,
         correct_answer: str,
-        target_audience: str,
+        chunk_content: str,
     ) -> PromptTestResult:
         """Test the MCQ Explanation Generator prompt with structured output."""
         start_time = time.monotonic()
         prompt_version = "unknown"
 
         try:
-            prompt_obj = await self._prompt_provider.get_prompt(
+            system_msg = await self._prompt_provider.get_system_prompt(
                 "MCQ Explanation Generator",
                 label=self._prompt_provider.default_label,
             )
 
-            compiled = prompt_obj.compile(
-                question_text=question,
-                topic=target_audience,
-                option_a=options.get("A", ""),
-                option_b=options.get("B", ""),
-                option_c=options.get("C", ""),
-                option_d=options.get("D", ""),
+            user_msg = self._user_prompt_builder.build_mcq_explanation_generator_prompt(
+                question_text=question_text,
+                topic=topic,
                 correct_answer=correct_answer,
-                chunk_content=target_audience,
+                option_a=option_a,
+                option_b=option_b,
+                option_c=option_c,
+                option_d=option_d,
+                chunk_content=chunk_content,
             )
 
-            prompt_str = str(compiled)
-            prompt_version = prompt_obj.version_string
-
-            agent = Agent(
-                model=self._cheap_model,
-                system_prompt="You are an expert at generating detailed explanations for MCQ distractors, with expertise in L1 interference patterns for English language learners.",
-            )
+            prompt_version = f"MCQ Explanation Generator@{self._prompt_provider.default_label}"
 
             async with asyncio.timeout(self._timeout_seconds):
-                result = await agent.invoke_async(
-                    prompt_str,
+                result = await self._llm_provider.invoke_with_system_and_user(
+                    system_message=system_msg,
+                    user_message=user_msg,
                     structured_output_model=MCQExplanationOutputSchema,
+                    model_tier="cheap",
                 )
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
 
             result_dict = (
-                result.structured_output.model_dump(mode="json")
-                if result and result.structured_output
+                result.model_dump(mode="json")
+                if result is not None
                 else None
             )
 
@@ -343,7 +310,7 @@ class PromptTestService:
         """Check if the prompt test service is functional."""
         try:
             # Check prompt provider
-            await self._prompt_provider.get_prompt("Assessment Generator")
+            await self._prompt_provider.get_system_prompt("Assessment Generator")
             return True
         except Exception:
             return False

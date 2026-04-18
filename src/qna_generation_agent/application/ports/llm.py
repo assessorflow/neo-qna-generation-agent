@@ -74,19 +74,32 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def invoke_with_schema(
+    async def invoke_with_system_and_user[T: BaseModel](
         self,
-        prompt: str,
+        system_message: str,
+        user_message: str,
         *,
         structured_output_model: type[T],
+        model_tier: str = "expensive",
     ) -> T | None:
-        """Invoke LLM with structured output schema.
+        """Invoke LLM with separate system and user messages.
+
+        This is the primary method for the new architecture. The system
+        message (fetched from Langfuse) defines role and format rules.
+        The user message (built from template) contains the specific
+        request data.
 
         Args:
-            prompt: The prompt to send to the LLM.
-            structured_output_model: Pydantic model for structured output.
+            system_message: Static system prompt from Langfuse.
+            user_message: Dynamic user prompt built from template.
+            structured_output_model: Pydantic model for response validation.
+            model_tier: Which model to use ("expensive" or "cheap").
 
         Returns:
             Parsed structured output or None if failed.
+
+        Raises:
+            LLMTransientError: Timeout, rate limit, server error (retry).
+            LLMPermanentError: Auth failure, bad request, model not found.
         """
         ...

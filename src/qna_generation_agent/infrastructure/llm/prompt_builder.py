@@ -178,7 +178,8 @@ class NonStructuredQuestionMetadataSchema(BaseModel):
 # =============================================================================
 # Langfuse Prompt: MCQ Explanation Generator
 # Generates detailed explanations for why MCQ answers are correct/incorrect
-# Variables: {question}, {options}, {correct_answer}, {target_audience}
+# Variables: {question_text}, {topic}, {option_a}, {option_b}, {option_c},
+#            {option_d}, {correct_answer}, {chunk_content}
 # =============================================================================
 
 
@@ -218,10 +219,14 @@ class MCQExplanationOutputSchema(BaseModel):
     - Common L1 interference errors (e.g., Chinese article confusion)
 
     Prompt Variables:
-        - question: The MCQ question stem
-        - options: JSON object with A, B, C, D options
+        - question_text: The MCQ question stem
+        - topic: Topic or target audience description
+        - option_a: Option A text
+        - option_b: Option B text
+        - option_c: Option C text
+        - option_d: Option D text
         - correct_answer: The correct option letter (A, B, C, D)
-        - target_audience: Description of target learners (e.g., Chinese L1, Vietnamese L1)
+        - chunk_content: Source context or target audience info
     """
 
     model_config = ConfigDict(strict=True)
@@ -239,16 +244,38 @@ class MCQExplanationOutputSchema(BaseModel):
         min_length=1,
         description="A teaching tip for instructors on how to address common errors",
     )
-    cefr_level: str = Field(
-        pattern="^(A1|A2|B1|B2|C1|C2)$",
+    cefr_level: str | None = Field(
+        default=None,
         description="Estimated CEFR level of this question",
     )
+    related_grammar: list[str] = Field(
+        default_factory=list,
+        description="Related grammar points for this question",
+    )
+    common_errors: list[str] = Field(
+        default_factory=list,
+        description="Common errors learners make on this question",
+    )
+
+    @field_validator("cefr_level", mode="before")
+    @classmethod
+    def _validate_cefr_level(cls, value: object) -> object:
+        """Validate CEFR level if provided."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            import re
+
+            if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
+                return value
+            raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
+        raise ValueError(f"CEFR level must be a string or None, got {type(value).__name__}")
 
 
 # =============================================================================
 # Langfuse Prompt: MCQ Answer Generator
 # Generates model answers and distractors for MCQ questions
-# Variables: {question_stem}, {grammar_target}, {difficulty}, {l1_background}
+# Variables: {question_text}, {topic}, {difficulty}, {chunk_content}
 # =============================================================================
 
 
@@ -261,10 +288,10 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
     - Rationale for each distractor design
 
     Prompt Variables:
-        - question_stem: The incomplete MCQ question stem
-        - grammar_target: The grammar point being tested (e.g., "article usage")
+        - question_text: The incomplete MCQ question stem
+        - topic: The grammar point or topic being tested (e.g., "article usage")
         - difficulty: Target difficulty (easy, medium, hard)
-        - l1_background: Target learner L1 (e.g., "Chinese", "Vietnamese", "Mixed")
+        - chunk_content: Source chunk content or target learner L1 info
     """
 
     model_config = ConfigDict(strict=True)
@@ -289,10 +316,32 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
         min_length=1,
         description="Why this difficulty level is appropriate for this content",
     )
+    grammar_points: list[str] = Field(
+        default_factory=list,
+        description="Grammar points tested by this question",
+    )
+    cefr_level: str | None = Field(
+        default=None,
+        description="Estimated CEFR level (A1/A2/B1/B2/C1/C2)",
+    )
     l1_considerations: list[str] = Field(
         default_factory=list,
         description="Specific L1 interference errors targeted by distractors",
     )
+
+    @field_validator("cefr_level", mode="before")
+    @classmethod
+    def _validate_cefr_level(cls, value: object) -> object:
+        """Validate CEFR level if provided."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            import re
+
+            if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
+                return value
+            raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
+        raise ValueError(f"CEFR level must be a string or None, got {type(value).__name__}")
 
     @field_validator("l1_considerations", mode="before")
     @classmethod
@@ -514,21 +563,37 @@ class MCQExplanationInputSchema(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    question: str = Field(
+    question_text: str = Field(
         min_length=1,
         description="The MCQ question stem",
     )
-    options: str = Field(
+    topic: str = Field(
         min_length=1,
-        description="JSON string with A, B, C, D options",
+        description="Topic or target audience description",
+    )
+    option_a: str = Field(
+        min_length=1,
+        description="Option A text",
+    )
+    option_b: str = Field(
+        min_length=1,
+        description="Option B text",
+    )
+    option_c: str = Field(
+        min_length=1,
+        description="Option C text",
+    )
+    option_d: str = Field(
+        min_length=1,
+        description="Option D text",
     )
     correct_answer: str = Field(
         pattern="^[ABCD]$",
         description="The correct option letter",
     )
-    target_audience: str = Field(
+    chunk_content: str = Field(
         min_length=1,
-        description="Description of target learners (e.g., 'Chinese L1 students')",
+        description="Source chunk content or target audience info",
     )
 
 
@@ -537,21 +602,21 @@ class MCQAnswerInputSchema(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    question_stem: str = Field(
+    question_text: str = Field(
         min_length=1,
         description="The incomplete MCQ question stem",
     )
-    grammar_target: str = Field(
+    topic: str = Field(
         min_length=1,
-        description="Specific grammar point being tested",
+        description="Specific grammar point or topic being tested",
     )
     difficulty: str = Field(
         pattern="^(easy|medium|hard)$",
         description="Target difficulty level",
     )
-    l1_background: str = Field(
+    chunk_content: str = Field(
         min_length=1,
-        description="Target learner L1 background (e.g., 'Chinese', 'Vietnamese')",
+        description="Source chunk content or target learner L1 background",
     )
 
 
