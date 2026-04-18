@@ -63,3 +63,6 @@ opencode.json
 .codex
 .opencode/
 specs/
+AGENTS.md
+.kimi/
+.agents/
