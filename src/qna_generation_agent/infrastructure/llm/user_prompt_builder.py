@@ -8,10 +8,6 @@ from __future__ import annotations
 
 from qna_generation_agent.application.errors import ValidationError
 
-# =============================================================================
-# Template Constants
-# =============================================================================
-
 _ASSESSMENT_GENERATOR_TEMPLATE: str = """Generate {structured_count} structured (MCQ) questions and {non_structured_count} open-ended questions at {difficulty} difficulty level.
 
 Topics: {topics}
@@ -46,11 +42,6 @@ D) {option_d}
 Context: {chunk_content}
 
 Return your response as a JSON object matching the MCQExplanationOutputSchema structure with question_analysis, option_explanations, teaching_tip, cefr_level, related_grammar, and common_errors fields."""
-
-
-# =============================================================================
-# UserPromptBuilder Class
-# =============================================================================
 
 
 class UserPromptBuilder:

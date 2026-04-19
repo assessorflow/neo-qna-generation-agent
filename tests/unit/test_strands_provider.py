@@ -14,6 +14,7 @@ from qna_generation_agent.application.errors import LLMPermanentError, LLMTransi
 from qna_generation_agent.domain.enums import DifficultyLevel, QuestionType
 from qna_generation_agent.infrastructure.llm import strands_provider as provider_module
 from qna_generation_agent.infrastructure.llm.prompt_builder import (
+    AssessmentGeneratorOutputSchema,
     GeneratedQuestionBatchSchema,
 )
 from qna_generation_agent.infrastructure.llm.strands_provider import StrandsLLMProvider
@@ -372,4 +373,258 @@ async def test_generate_raises_on_invalid_output_type(
             count=1,
             difficulty_level=DifficultyLevel.MEDIUM,
             correlation_id="corr_123",
+        )
+
+
+# ============================================================================
+# invoke_with_system_and_user Tests
+# ============================================================================
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_returns_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: invoke with system_message, user_message, and schema returns parsed structured output."""
+    FakeAgent.responses = [
+        SimpleNamespace(
+            structured_output=AssessmentGeneratorOutputSchema.model_validate(
+                {
+                    "questions": [
+                        {
+                            "question_id": "q-1",
+                            "question_type": "structured",
+                            "question_text": "What is the capital?",
+                            "answer_text": "Paris",
+                            "metadata": {
+                                "question_type": "structured",
+                                "options": {
+                                    "A": "London",
+                                    "B": "Paris",
+                                    "C": "Berlin",
+                                    "D": "Madrid",
+                                },
+                                "source_chunk_ids": ["chunk-1"],
+                                "difficulty": "easy",
+                                "topic": "Geography",
+                            },
+                        }
+                    ]
+                }
+            )
+        ),
+    ]
+    provider = _provider(monkeypatch)
+
+    result = await provider.invoke_with_system_and_user(
+        system_message="You are a test generator",
+        user_message="Generate one question",
+        structured_output_model=AssessmentGeneratorOutputSchema,
+    )
+
+    assert result is not None
+    assert len(result.questions) == 1
+    assert result.questions[0].question_text == "What is the capital?"
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_uses_cheap_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When model_tier='cheap', uses the cheap model."""
+    FakeAgent.responses = [
+        SimpleNamespace(
+            structured_output=AssessmentGeneratorOutputSchema.model_validate(
+                {
+                    "questions": [
+                        {
+                            "question_id": "q-1",
+                            "question_type": "structured",
+                            "question_text": "Q?",
+                            "answer_text": "A",
+                            "metadata": {
+                                "question_type": "structured",
+                                "options": {
+                                    "A": "A",
+                                    "B": "B",
+                                    "C": "C",
+                                    "D": "D",
+                                },
+                                "source_chunk_ids": ["c1"],
+                                "difficulty": "easy",
+                                "topic": "Test",
+                            },
+                        }
+                    ]
+                }
+            )
+        ),
+    ]
+    monkeypatch.setattr(provider_module, "Agent", FakeAgent)
+    monkeypatch.setattr(provider_module, "OpenAIModel", FakeOpenAIModel)
+    provider = StrandsLLMProvider(
+        model_provider="openai",
+        model_id="gpt-4o-mini",
+        api_key="test-key",
+        base_url=None,
+        timeout_seconds=1,
+        cheap_model_id="gpt-3.5-turbo",
+        expensive_model_id="gpt-4o",
+    )
+
+    await provider.invoke_with_system_and_user(
+        system_message="System prompt",
+        user_message="User prompt",
+        structured_output_model=AssessmentGeneratorOutputSchema,
+        model_tier="cheap",
+    )
+
+    cache_keys = list(provider._agent_cache.keys())
+    assert len(cache_keys) == 1
+    assert cache_keys[0].startswith("gpt-3.5-turbo:")
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_uses_expensive_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When model_tier='expensive', uses the expensive model."""
+    FakeAgent.responses = [
+        SimpleNamespace(
+            structured_output=AssessmentGeneratorOutputSchema.model_validate(
+                {
+                    "questions": [
+                        {
+                            "question_id": "q-1",
+                            "question_type": "structured",
+                            "question_text": "Q?",
+                            "answer_text": "A",
+                            "metadata": {
+                                "question_type": "structured",
+                                "options": {
+                                    "A": "A",
+                                    "B": "B",
+                                    "C": "C",
+                                    "D": "D",
+                                },
+                                "source_chunk_ids": ["c1"],
+                                "difficulty": "easy",
+                                "topic": "Test",
+                            },
+                        }
+                    ]
+                }
+            )
+        ),
+    ]
+    monkeypatch.setattr(provider_module, "Agent", FakeAgent)
+    monkeypatch.setattr(provider_module, "OpenAIModel", FakeOpenAIModel)
+    provider = StrandsLLMProvider(
+        model_provider="openai",
+        model_id="gpt-4o-mini",
+        api_key="test-key",
+        base_url=None,
+        timeout_seconds=1,
+        cheap_model_id="gpt-3.5-turbo",
+        expensive_model_id="gpt-4o",
+    )
+
+    await provider.invoke_with_system_and_user(
+        system_message="System prompt",
+        user_message="User prompt",
+        structured_output_model=AssessmentGeneratorOutputSchema,
+        model_tier="expensive",
+    )
+
+    cache_keys = list(provider._agent_cache.keys())
+    assert len(cache_keys) == 1
+    assert cache_keys[0].startswith("gpt-4o:")
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_uses_default_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no tier specified, uses the default (expensive) model."""
+    FakeAgent.responses = [
+        SimpleNamespace(
+            structured_output=AssessmentGeneratorOutputSchema.model_validate(
+                {
+                    "questions": [
+                        {
+                            "question_id": "q-1",
+                            "question_type": "structured",
+                            "question_text": "Q?",
+                            "answer_text": "A",
+                            "metadata": {
+                                "question_type": "structured",
+                                "options": {
+                                    "A": "A",
+                                    "B": "B",
+                                    "C": "C",
+                                    "D": "D",
+                                },
+                                "source_chunk_ids": ["c1"],
+                                "difficulty": "easy",
+                                "topic": "Test",
+                            },
+                        }
+                    ]
+                }
+            )
+        ),
+    ]
+    monkeypatch.setattr(provider_module, "Agent", FakeAgent)
+    monkeypatch.setattr(provider_module, "OpenAIModel", FakeOpenAIModel)
+    provider = StrandsLLMProvider(
+        model_provider="openai",
+        model_id="gpt-4o-mini",
+        api_key="test-key",
+        base_url=None,
+        timeout_seconds=1,
+        cheap_model_id="gpt-3.5-turbo",
+        expensive_model_id="gpt-4o",
+    )
+
+    await provider.invoke_with_system_and_user(
+        system_message="System prompt",
+        user_message="User prompt",
+        structured_output_model=AssessmentGeneratorOutputSchema,
+    )
+
+    cache_keys = list(provider._agent_cache.keys())
+    assert len(cache_keys) == 1
+    assert cache_keys[0].startswith("gpt-4o:")
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_raises_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When agent takes too long, raises LLMTransientError."""
+    FakeAgent.responses = [("sleep", 0.05)]
+    provider = _provider(monkeypatch)
+    provider._timeout_seconds = 0
+
+    with pytest.raises(LLMTransientError):
+        await provider.invoke_with_system_and_user(
+            system_message="System prompt",
+            user_message="User prompt",
+            structured_output_model=AssessmentGeneratorOutputSchema,
+        )
+
+
+@pytest.mark.unit
+async def test_invoke_with_system_and_user_raises_on_invalid_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When result lacks structured_output attribute, raises LLMPermanentError."""
+    FakeAgent.responses = [SimpleNamespace()]
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(LLMPermanentError):
+        await provider.invoke_with_system_and_user(
+            system_message="System prompt",
+            user_message="User prompt",
+            structured_output_model=AssessmentGeneratorOutputSchema,
         )

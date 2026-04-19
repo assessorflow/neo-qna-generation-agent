@@ -1824,12 +1824,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "blacksheep" },
+    { name = "essentials-openapi" },
     { name = "google-cloud-pubsub" },
     { name = "granian", extra = ["reload"] },
     { name = "grpcio" },
     { name = "langfuse" },
     { name = "openai" },
     { name = "orjson" },
+    { name = "protobuf" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "strands-agents", extra = ["openai"] },
@@ -1857,6 +1859,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "blacksheep", specifier = ">=2.6" },
+    { name = "essentials-openapi", specifier = ">=1.1" },
     { name = "google-cloud-pubsub", specifier = ">=2.37" },
     { name = "granian", extras = ["reload"], specifier = ">=2.7" },
     { name = "grpcio", specifier = ">=1.80" },
@@ -1867,6 +1870,7 @@ requires-dist = [
     { name = "orjson", specifier = ">=3.11" },
     { name = "pip-audit", marker = "extra == 'audit'", specifier = ">=2.10" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.5" },
+    { name = "protobuf", specifier = ">=5.29" },
     { name = "pydantic", specifier = ">=2.13" },
     { name = "pydantic-settings", specifier = ">=2.13" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0" },

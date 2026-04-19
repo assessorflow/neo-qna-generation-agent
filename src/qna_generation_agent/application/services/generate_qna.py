@@ -112,6 +112,7 @@ class GenerateQnAService:
         cheap_llm_provider: LLMProvider | None = None,
         expensive_llm_provider: LLMProvider | None = None,
     ) -> None:
+        """Initialize the generation service with required ports."""
         self._llm_provider = llm_provider
         self._question_set_repo = question_set_repo
         self._idempotency_store = idempotency_store

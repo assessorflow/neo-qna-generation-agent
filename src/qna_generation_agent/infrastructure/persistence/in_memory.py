@@ -28,10 +28,12 @@ class InMemoryIdempotencyStore(IdempotencyStore):
     """
 
     def __init__(self) -> None:
+        """Initialize the in-memory idempotency store."""
         self._records: dict[str, IdempotencyRecord] = {}
         self._lock = asyncio.Lock()
 
     async def get(self, event_id: str) -> IdempotencyRecord:
+        """Retrieve the idempotency record for an event."""
         async with self._lock:
             return self._records.get(
                 event_id,
@@ -105,10 +107,12 @@ class InMemoryQuestionSetRepository(QuestionSetRepository):
     """In-memory question-set adapter."""
 
     def __init__(self) -> None:
+        """Initialize the in-memory question set repository."""
         self._question_sets: dict[str, QuestionSet] = {}
         self._lock = asyncio.Lock()
 
     async def next_iteration(self, *, assessment_id: str) -> int:
+        """Compute the next iteration number for an assessment."""
         iterations = [
             question_set.iteration
             for question_set in self._question_sets.values()
@@ -117,10 +121,12 @@ class InMemoryQuestionSetRepository(QuestionSetRepository):
         return (max(iterations) + 1) if iterations else 1
 
     async def save(self, question_set: QuestionSet) -> None:
+        """Store a question set (deep-copied)."""
         async with self._lock:
             self._question_sets[question_set.id] = replace(question_set)
 
     async def get_by_id(self, question_set_id: str) -> QuestionSet | None:
+        """Retrieve a question set by ID."""
         async with self._lock:
             question_set = self._question_sets.get(question_set_id)
             if question_set is None:

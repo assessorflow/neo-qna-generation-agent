@@ -34,6 +34,7 @@ class PromptTestResult:
         raw_output: str | None = None,
         error: str | None = None,
     ) -> None:
+        """Initialize a prompt test result."""
         self.result = result
         self.prompt_version = prompt_version
         self.execution_time_ms = execution_time_ms

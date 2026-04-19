@@ -63,6 +63,7 @@ def _make_cors_middleware(
     """Create CORS middleware with injected settings."""
 
     async def cors_middleware(request: Request, handler: Handler) -> Response:
+        """Add CORS headers to responses."""
         if request.method == "OPTIONS":
             response = Response(204)
         else:
@@ -118,11 +119,13 @@ def create_blacksheep_app(
     # TestClient mode also works correctly.
     @application.on_start
     async def on_start() -> None:
+        """Start the application container."""
         await app_container.startup()
         logger.info("http_application_started")
 
     @application.on_stop
     async def on_stop() -> None:
+        """Stop the application container."""
         await app_container.shutdown()
         logger.info("http_application_stopped")
 

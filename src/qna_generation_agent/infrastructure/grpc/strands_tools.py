@@ -147,6 +147,7 @@ class KnowledgeServiceTools:
         tls_enabled: bool = False,
         tls_cert_path: str | None = None,
     ) -> None:
+        """Initialize Knowledge Service tools."""
         self._client = GrpcKnowledgeClient(
             target=target,
             timeout_seconds=timeout_seconds,
@@ -272,6 +273,7 @@ class SubmissionServiceTools:
         tls_enabled: bool = False,
         tls_cert_path: str | None = None,
     ) -> None:
+        """Initialize Submission Service tools."""
         self._client = GrpcSubmissionClient(
             target=target,
             timeout_seconds=timeout_seconds,
@@ -500,6 +502,7 @@ class QnAGenerationToolkit:
         tls_enabled: bool = False,
         tls_cert_path: str | None = None,
     ) -> None:
+        """Initialize the combined QnA generation toolkit."""
         self._knowledge_tools = KnowledgeServiceTools(
             target=knowledge_target,
             timeout_seconds=timeout_seconds,

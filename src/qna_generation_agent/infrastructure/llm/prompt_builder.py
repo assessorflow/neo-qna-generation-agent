@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
+import re
 
+import orjson
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from qna_generation_agent.application.dto import AssessmentContext
 from qna_generation_agent.domain.enums import QuestionType
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
 
 
 def format_chunks_for_prompt(chunks: list[str]) -> str:
@@ -26,11 +23,6 @@ def format_chunks_for_prompt(chunks: list[str]) -> str:
     return "\n\n".join(f"[Chunk {i}] {chunk}" for i, chunk in enumerate(chunks, start=1))
 
 
-# =============================================================================
-# Legacy GeneratedQuestion Schemas (for backward compatibility)
-# =============================================================================
-
-
 class GeneratedQuestionSchema(BaseModel):
     """Structured output schema returned by the model.
 
@@ -39,14 +31,12 @@ class GeneratedQuestionSchema(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    # Question field - many variations
     question_text: str | None = Field(default=None, min_length=1)
     content: str | None = Field(default=None, min_length=1)
     text: str | None = Field(default=None, min_length=1)
     prompt: str | None = Field(default=None, min_length=1)
     query: str | None = Field(default=None, min_length=1)
 
-    # Answer field - many variations
     answer_text: str | None = Field(default=None, min_length=1)
     structured_answer: str | None = Field(default=None, min_length=1)
     answer: str | None = Field(default=None, min_length=1)
@@ -58,7 +48,6 @@ class GeneratedQuestionSchema(BaseModel):
     explanation: str | None = None
     references: list[str] = Field(default_factory=list)
     topic_id: str | None = None
-    # Flexible metadata - accepts any JSON-compatible values
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -67,11 +56,9 @@ class GeneratedQuestionSchema(BaseModel):
 
         Answer is optional - incomplete questions are filtered downstream.
         """
-        # Get question from any field
         question = (
             self.question_text or self.content or self.text or self.prompt or self.query
         )
-        # Get answer from any field (optional)
         answer = (
             self.answer_text
             or self.structured_answer
@@ -88,7 +75,6 @@ class GeneratedQuestionSchema(BaseModel):
                 "question_text, content, text, prompt, query"
             )
 
-        # Set the canonical field names
         self.question_text = question
         self.answer_text = answer  # May be None - filtered downstream
         return self
@@ -100,13 +86,6 @@ class GeneratedQuestionBatchSchema(BaseModel):
     model_config = ConfigDict(strict=True)
 
     questions: list[GeneratedQuestionSchema]
-
-
-# =============================================================================
-# Langfuse Prompt: Assessment Generator
-# Generates ELP assessment questions for foreign students in Singapore
-# Variables: {structured_count}, {non_structured_count}, {difficulty}, {topics}, {chunks}
-# =============================================================================
 
 
 class MCQOptionsSchema(BaseModel):
@@ -173,14 +152,6 @@ class NonStructuredQuestionMetadataSchema(BaseModel):
         default="",
         description="Grading rubric for open-ended questions",
     )
-
-
-# =============================================================================
-# Langfuse Prompt: MCQ Explanation Generator
-# Generates detailed explanations for why MCQ answers are correct/incorrect
-# Variables: {question_text}, {topic}, {option_a}, {option_b}, {option_c},
-#            {option_d}, {correct_answer}, {chunk_content}
-# =============================================================================
 
 
 class MCQDistractorExplanationSchema(BaseModel):
@@ -264,19 +235,10 @@ class MCQExplanationOutputSchema(BaseModel):
         if value is None or value == "":
             return None
         if isinstance(value, str):
-            import re
-
             if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
                 return value
             raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
         raise ValueError(f"CEFR level must be a string or None, got {type(value).__name__}")
-
-
-# =============================================================================
-# Langfuse Prompt: MCQ Answer Generator
-# Generates model answers and distractors for MCQ questions
-# Variables: {question_text}, {topic}, {difficulty}, {chunk_content}
-# =============================================================================
 
 
 class MCQAnswerGeneratorOutputSchema(BaseModel):
@@ -336,8 +298,6 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
         if value is None or value == "":
             return None
         if isinstance(value, str):
-            import re
-
             if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
                 return value
             raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
@@ -356,10 +316,10 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
             # If string looks like a list representation, try to parse it
             if value.startswith("[") and value.endswith("]"):
                 try:
-                    parsed = json.loads(value)
+                    parsed = orjson.loads(value)
                     if isinstance(parsed, list):
                         return [str(item) for item in parsed]
-                except json.JSONDecodeError:
+                except orjson.JSONDecodeError:
                     pass
             # Treat as single item or comma-separated
             if "," in value:
@@ -369,13 +329,6 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
             return [str(item) for item in value]
         # For any other type, convert to string and wrap in list
         return [str(value)]
-
-
-# =============================================================================
-# Langfuse Prompt: Assessment Generator (v2)
-# Generates ELP assessment questions with detailed metadata
-# Variables: {structured_count}, {non_structured_count}, {difficulty}, {topics}, {chunks}
-# =============================================================================
 
 
 class AssessmentQuestionSchema(BaseModel):
@@ -504,11 +457,6 @@ class AssessmentGeneratorOutputSchema(BaseModel):
         return value
 
 
-# =============================================================================
-# Prompt Input Schemas (for variable validation)
-# =============================================================================
-
-
 class AssessmentGeneratorInputSchema(BaseModel):
     """Input variables for the Assessment Generator prompt.
 
@@ -618,11 +566,6 @@ class MCQAnswerInputSchema(BaseModel):
         min_length=1,
         description="Source chunk content or target learner L1 background",
     )
-
-
-# =============================================================================
-# Legacy Prompt Builders (for backward compatibility)
-# =============================================================================
 
 
 def build_system_prompt(question_type: QuestionType) -> str:

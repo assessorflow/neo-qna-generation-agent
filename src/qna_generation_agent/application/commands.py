@@ -42,6 +42,7 @@ class HandleGenerationTrigger:
     """Translate inbound events into a generation command."""
 
     def __init__(self, service: GenerateQnAService) -> None:
+        """Initialize with the generation service."""
         self._service = service
 
     async def handle(self, event: QnAGenerationTriggered) -> GenerationReceipt:

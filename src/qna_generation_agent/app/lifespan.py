@@ -140,7 +140,6 @@ async def _run_health_checks(container: ApplicationContainer) -> RuntimeState:
     """Run health checks on all dependencies and update state."""
     state = get_runtime_state()
 
-    # Check LLM
     if container.llm_provider is not None:
         try:
             if hasattr(container.llm_provider, "health_check"):
@@ -153,7 +152,6 @@ async def _run_health_checks(container: ApplicationContainer) -> RuntimeState:
             logger.warning("llm_health_check_failed", error=str(error))
             state.llm_healthy = False
 
-    # Check Knowledge Service
     if container.knowledge_client is not None:
         try:
             if hasattr(container.knowledge_client, "health_check"):
@@ -167,7 +165,6 @@ async def _run_health_checks(container: ApplicationContainer) -> RuntimeState:
             logger.warning("knowledge_health_check_failed", error=str(error))
             state.knowledge_service_healthy = False
 
-    # Check Submission Service
     if container.submission_client is not None:
         try:
             if hasattr(container.submission_client, "health_check"):
@@ -181,7 +178,6 @@ async def _run_health_checks(container: ApplicationContainer) -> RuntimeState:
             logger.warning("submission_health_check_failed", error=str(error))
             state.submission_service_healthy = False
 
-    # Check Telemetry
     if container.telemetry is not None:
         try:
             if hasattr(container.telemetry, "health_check"):
@@ -193,10 +189,8 @@ async def _run_health_checks(container: ApplicationContainer) -> RuntimeState:
             logger.warning("telemetry_health_check_failed", error=str(error))
             state.telemetry_healthy = False
     else:
-        # No telemetry configured is OK
         state.telemetry_healthy = True
 
-    # Check Prompt Provider (optional)
     if container.prompt_provider is not None:
         try:
             if hasattr(container.prompt_provider, "health_check"):
@@ -241,14 +235,11 @@ async def lifespan(container: ApplicationContainer) -> AsyncIterator[RuntimeStat
             telemetry=bool(container.telemetry),
         )
 
-        # Start container (includes subscriber start)
         await container.startup()
 
-        # Track subscriber state explicitly
         if container.subscriber is not None:
             _runtime_state.subscriber_running = True
 
-        # Run initial health checks
         await _run_health_checks(container)
 
         _runtime_state.lifecycle = LifecycleState.RUNNING
@@ -271,7 +262,6 @@ async def lifespan(container: ApplicationContainer) -> AsyncIterator[RuntimeStat
             _runtime_state.lifecycle = LifecycleState.SHUTTING_DOWN
             logger.info("lifespan_shutdown_begin")
 
-            # Mark subscriber as not running
             _runtime_state.subscriber_running = False
 
             try:

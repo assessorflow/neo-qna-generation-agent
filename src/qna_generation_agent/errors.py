@@ -12,11 +12,13 @@ class AppError(Exception):
     """Base class for typed application errors."""
 
     def __init__(self, message: str, **context: Any) -> None:
+        """Initialize with a message and optional structured context."""
         super().__init__(message)
         self.message = message
         self.context = context
 
     def __str__(self) -> str:
+        """Return a human-readable representation with context details."""
         if not self.context:
             return self.message
 

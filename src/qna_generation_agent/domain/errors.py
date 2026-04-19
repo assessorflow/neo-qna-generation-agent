@@ -35,6 +35,7 @@ class InvalidStateTransitionError(InconsistentStateError):
         to_state: str,
         entity_id: str,
     ) -> None:
+        """Initialize with state transition context."""
         super().__init__(
             message,
             from_state=from_state,

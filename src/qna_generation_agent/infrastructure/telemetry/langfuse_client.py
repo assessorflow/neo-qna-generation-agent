@@ -19,12 +19,15 @@ class _LangfuseSpan(Span):
     """Span wrapper used by the telemetry port."""
 
     def __init__(self, client: Langfuse) -> None:
+        """Initialize with a Langfuse client instance."""
         self._client = client
 
     def set_attribute(self, key: str, value: Any) -> None:
+        """Set a metadata attribute on the current span."""
         self._client.update_current_span(metadata={key: str(value)})
 
     def record_error(self, error: BaseException) -> None:
+        """Record an exception on the current span."""
         self._client.update_current_span(
             metadata={"error_type": type(error).__name__},
             status_message=str(error),
@@ -43,6 +46,15 @@ class LangfuseTelemetry(TelemetryPort):
         environment: str,
         release: str | None,
     ) -> None:
+        """Initialize the Langfuse telemetry adapter.
+
+        Args:
+            public_key: Langfuse public key.
+            secret_key: Langfuse secret key.
+            host: Langfuse host URL.
+            environment: Runtime environment name.
+            release: Optional release version.
+        """
         self._client = Langfuse(
             public_key=public_key,
             secret_key=secret_key,
@@ -58,6 +70,7 @@ class LangfuseTelemetry(TelemetryPort):
         *,
         metadata: dict[str, str] | None = None,
     ) -> Generator[Span]:
+        """Start a named trace/observation scope."""
         with self._client.start_as_current_observation(
             name=name,
             metadata=metadata or {},
@@ -77,6 +90,7 @@ class LangfuseTelemetry(TelemetryPort):
         workflow_id: str,
         metadata: dict[str, str] | None = None,
     ) -> Generator[None]:
+        """Propagate trace context with correlation and workflow IDs."""
         merged_metadata = {"workflow_id": workflow_id, **(metadata or {})}
         with propagate_attributes(
             trace_name=trace_name,
@@ -94,9 +108,11 @@ class LangfuseTelemetry(TelemetryPort):
                 yield
 
     def current_trace_id(self) -> str | None:
+        """Return the current trace ID if available."""
         return self._client.get_current_trace_id()
 
     def current_trace_url(self) -> str | None:
+        """Return the URL to the current trace in Langfuse."""
         return self._client.get_trace_url()
 
     async def shutdown(self) -> None:

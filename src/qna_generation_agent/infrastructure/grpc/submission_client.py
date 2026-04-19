@@ -52,6 +52,14 @@ class GrpcSubmissionClient(SubmissionClient):
         tls_enabled: bool = False,
         tls_cert_path: str | None = None,
     ) -> None:
+        """Initialize the gRPC Submission Service client.
+
+        Args:
+            target: gRPC target URL.
+            timeout_seconds: Default timeout for RPC calls.
+            tls_enabled: Whether to use TLS.
+            tls_cert_path: Optional path to a custom CA certificate.
+        """
         self._target = target
         self._timeout_seconds = timeout_seconds
         self._channel = create_channel(

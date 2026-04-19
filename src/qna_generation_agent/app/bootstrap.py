@@ -264,19 +264,15 @@ def _build_subscriber(
 
 
 def _build_container(settings: Settings) -> ApplicationContainer:
-    # Dependency injection pattern: build all adapters in one place.
     telemetry = _build_telemetry(settings)
     prompt_provider = _build_prompt_provider(settings)
 
-    # Build cost-optimized LLM providers
     cheap_llm_provider = _build_cheap_llm(settings)
     expensive_llm_provider = _build_expensive_llm(settings)
-    # Backwards compatibility: llm_provider points to expensive
     llm_provider = expensive_llm_provider
 
     submission_client = _build_submission_client(settings)
 
-    # Always use in-memory adapters
     question_set_repo: QuestionSetRepository = InMemoryQuestionSetRepository()
     idempotency_store: IdempotencyStore = InMemoryIdempotencyStore()
 
@@ -294,10 +290,8 @@ def _build_container(settings: Settings) -> ApplicationContainer:
     else:
         event_publisher = NullEventPublisher()
 
-    # Build gRPC clients before subscriber (subscriber needs them)
     knowledge_client = _build_knowledge_client(settings)
 
-    # Create the generation service (used by both subscriber and HTTP tests)
     generate_service = GenerateQnAService(
         llm_provider=llm_provider,
         question_set_repo=question_set_repo,
@@ -319,7 +313,6 @@ def _build_container(settings: Settings) -> ApplicationContainer:
             generate_service=generate_service,
         )
 
-    # Build prompt test service for development/testing endpoints
     prompt_test_service = _build_prompt_test_service(settings, prompt_provider, llm_provider)
 
     return ApplicationContainer(

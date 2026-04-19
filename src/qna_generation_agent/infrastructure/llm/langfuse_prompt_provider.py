@@ -43,7 +43,16 @@ class LangfusePromptProvider(PromptProvider):
         release: str | None = None,
         default_label: str = "production",
     ) -> None:
-        """Initialize the Langfuse client for prompt management."""
+        """Initialize the Langfuse prompt provider.
+
+        Args:
+            public_key: Langfuse public key.
+            secret_key: Langfuse secret key.
+            host: Langfuse host URL.
+            environment: Runtime environment name.
+            release: Optional release version.
+            default_label: Default prompt label (e.g., "production").
+        """
         self._default_label = default_label
         self._client = Langfuse(
             public_key=public_key,
@@ -67,13 +76,11 @@ class LangfusePromptProvider(PromptProvider):
         version: int | None = None,
     ) -> Prompt:
         """Internal prompt fetch without deprecation warning."""
-        # Bind trace_id to structlog context for correlation
         trace_id = self._client.get_current_trace_id()
         if trace_id:
             bind_context(trace_id=trace_id)
 
         try:
-            # Build kwargs for get_prompt
             kwargs: dict[str, Any] = {}
             if label is not None:
                 kwargs["label"] = label
@@ -85,11 +92,9 @@ class LangfusePromptProvider(PromptProvider):
 
             langfuse_prompt = await asyncio.to_thread(_fetch_prompt, name, kwargs)
 
-            # Determine if it's a chat or text prompt
             chat_messages = None
             prompt_text = None
 
-            # Check for chat messages attribute
             if (
                 hasattr(langfuse_prompt, "chat_messages")
                 and langfuse_prompt.chat_messages
@@ -100,29 +105,23 @@ class LangfusePromptProvider(PromptProvider):
                 ]
             elif hasattr(langfuse_prompt, "prompt"):
                 raw_prompt = langfuse_prompt.prompt
-                # Ensure prompt_text is always a string
                 if isinstance(raw_prompt, list):
-                    # Convert list to string (join or take first element)
                     if len(raw_prompt) > 0 and isinstance(raw_prompt[0], dict):
-                        # It's a list of message dicts - convert to chat format
                         chat_messages = [
                             {"role": msg.get("role"), "content": msg.get("content")}
                             for msg in raw_prompt
                         ]
                     else:
-                        # It's a list of strings - join them
                         prompt_text = "\n".join(str(p) for p in raw_prompt)
                 else:
                     prompt_text = str(raw_prompt)
 
-            # Get labels if available
             labels = None
             if hasattr(langfuse_prompt, "labels"):
                 labels = (
                     list(langfuse_prompt.labels) if langfuse_prompt.labels else None
                 )
 
-            # Get config if available
             config = None
             if hasattr(langfuse_prompt, "config"):
                 config = langfuse_prompt.config
@@ -173,7 +172,7 @@ class LangfusePromptProvider(PromptProvider):
         return self._default_label
 
     async def shutdown(self) -> None:
-        """Flush and shutdown the Langfuse client."""
+        """Flush and close the Langfuse client."""
         try:
             await asyncio.to_thread(self._client.flush)
         except (OSError, TimeoutError, ConnectionError) as e:
@@ -196,9 +195,8 @@ class LangfusePromptProvider(PromptProvider):
             )
 
     async def health_check(self) -> bool:
-        """Check connectivity to Langfuse prompt management."""
+        """Check connectivity by fetching a known prompt."""
         try:
-            # Try to fetch Assessment Generator as health check
             await asyncio.to_thread(self._client.get_prompt, self.ASSESSMENT_GENERATOR)
             return True
         except Exception as error:
@@ -214,7 +212,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the Assessment Generator prompt."""
+        """Fetch the Assessment Generator prompt from Langfuse."""
         return await self._fetch_prompt(
             self.ASSESSMENT_GENERATOR,
             label=label,
@@ -227,7 +225,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the MCQ Explanation Generator prompt."""
+        """Fetch the MCQ Explanation Generator prompt from Langfuse."""
         return await self._fetch_prompt(
             self.MCQ_EXPLANATION_GENERATOR,
             label=label,
@@ -240,7 +238,7 @@ class LangfusePromptProvider(PromptProvider):
         label: str | None = None,
         version: int | None = None,
     ) -> Prompt:
-        """Fetch the MCQ Answer Generator prompt."""
+        """Fetch the MCQ Answer Generator prompt from Langfuse."""
         return await self._fetch_prompt(
             self.MCQ_ANSWER_GENERATOR,
             label=label,
@@ -275,13 +273,11 @@ class LangfusePromptProvider(PromptProvider):
 
         result: str
         if prompt.is_chat_prompt():
-            # Extract first system message from chat_messages
             for msg in prompt.chat_messages or []:
                 if msg.get("role") == "system":
                     result = msg.get("content", "")
                     break
             else:
-                # Fallback: return first message content
                 if prompt.chat_messages:
                     result = prompt.chat_messages[0].get("content", "")
                 else:

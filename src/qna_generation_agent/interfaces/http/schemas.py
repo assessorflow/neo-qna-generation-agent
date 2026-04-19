@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
-    """Health response."""
+    """Health check response."""
 
     model_config = ConfigDict(strict=True)
 
@@ -16,7 +16,7 @@ class HealthResponse(BaseModel):
 
 
 class LiveResponse(BaseModel):
-    """Liveness response."""
+    """Liveness probe response."""
 
     model_config = ConfigDict(strict=True)
 
@@ -24,7 +24,7 @@ class LiveResponse(BaseModel):
 
 
 class ReadyResponse(BaseModel):
-    """Readiness response."""
+    """Readiness probe response."""
 
     model_config = ConfigDict(strict=True)
 
@@ -33,7 +33,7 @@ class ReadyResponse(BaseModel):
 
 
 class VersionResponse(BaseModel):
-    """Version response."""
+    """Version information response."""
 
     model_config = ConfigDict(strict=True)
 
@@ -42,17 +42,12 @@ class VersionResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Structured API error response."""
+    """Standard error response."""
 
     model_config = ConfigDict(strict=True)
 
     error: str
     request_id: str
-
-
-# =============================================================================
-# Prompt Testing Schemas
-# =============================================================================
 
 
 class AssessmentGeneratorTestRequest(BaseModel):
