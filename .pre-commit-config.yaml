@@ -33,3 +33,18 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
+
+  - repo: local
+    hooks:
+      - id: codeaudit
+        name: codeaudit
+        entry: bash -c 'codeaudit filescan src/ /dev/null 2>&1 || true'
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.py$
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.24.1
+    hooks:
+      - id: zizmor
+        files: ^\.github/workflows/

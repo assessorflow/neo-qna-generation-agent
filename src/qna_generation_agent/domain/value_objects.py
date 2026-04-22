@@ -73,7 +73,7 @@ class ContentHash:
         if algorithm == "sha256":
             hasher = hashlib.sha256()
         elif algorithm == "md5":
-            hasher = hashlib.md5()
+            hasher = hashlib.md5(usedforsecurity=False)
         elif algorithm == "blake2b":
             hasher = hashlib.blake2b()
         else:
