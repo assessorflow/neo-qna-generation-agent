@@ -28,6 +28,9 @@ RUN /usr/local/bin/uv sync --frozen --no-dev --no-editable --active
 
 FROM rockylinux/rockylinux:10-ubi
 
+RUN dnf upgrade -y && \
+    dnf clean all
+
 ENV VIRTUAL_ENV=/opt/app/.venv \
     PATH=/opt/app/.venv/bin:/opt/python/current/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
