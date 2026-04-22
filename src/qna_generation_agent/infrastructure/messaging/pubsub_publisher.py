@@ -40,15 +40,19 @@ class NullEventPublisher(EventPublisher):
     """Null-object publisher used when outbound Pub/Sub is disabled."""
 
     async def publish_completion(self, event: QnAGenerationCompleted) -> None:
+        """No-op completion publish."""
         return None
 
     async def publish_decision_audit(self, event: DecisionAuditEvent) -> None:
+        """No-op decision audit publish."""
         return None
 
     async def publish_token_usage(self, event: TokenUsageEvent) -> None:
+        """No-op token usage publish."""
         return None
 
     async def close(self) -> None:
+        """No-op close."""
         return None
 
 
@@ -67,6 +71,14 @@ class PubSubCompletionPublisher(EventPublisher):
         decision_audit_topic_id: str | None = None,
         token_usage_topic_id: str | None = None,
     ) -> None:
+        """Initialize the Pub/Sub completion publisher.
+
+        Args:
+            project_id: GCP project ID.
+            topic_id: Topic for completion events.
+            decision_audit_topic_id: Optional topic for decision audit events.
+            token_usage_topic_id: Optional topic for token usage events.
+        """
         self._project_id = project_id
         self._topic_id = topic_id
         self._decision_audit_topic_id = decision_audit_topic_id

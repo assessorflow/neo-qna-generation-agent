@@ -84,6 +84,19 @@ class StrandsLLMProvider(LLMProvider):
         cheap_model_id: str | None = None,
         expensive_model_id: str | None = None,
     ) -> None:
+        """Initialize the Strands LLM provider.
+
+        Args:
+            model_provider: Only "openai" is supported.
+            model_id: Default model identifier.
+            api_key: API key for the LLM provider.
+            base_url: Optional base URL override.
+            timeout_seconds: Timeout for LLM invocations.
+            max_tokens: Maximum output tokens.
+            temperature: Sampling temperature.
+            cheap_model_id: Optional cost-optimized model.
+            expensive_model_id: Optional high-quality model.
+        """
         if model_provider != "openai":
             raise LLMPermanentError(
                 "Only the OpenAI Strands backend is configured",
@@ -93,17 +106,14 @@ class StrandsLLMProvider(LLMProvider):
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
 
-        # Store client args for health check reuse
         self._api_key = api_key
         self._base_url = base_url
 
-        # Determine model IDs with fallback to main model_id
         cheap_id = cheap_model_id if cheap_model_id else model_id
         expensive_id = expensive_model_id if expensive_model_id else model_id
         self._cheap_model_id = cheap_id
         self._expensive_model_id = expensive_id
 
-        # Initialize Strands OpenAIModel for default (main) tier
         self._model = OpenAIModel(
             client_args={
                 "api_key": api_key,
@@ -116,7 +126,6 @@ class StrandsLLMProvider(LLMProvider):
             },
         )
 
-        # Initialize tier-specific models
         self._cheap_model = OpenAIModel(
             client_args={
                 "api_key": api_key,
@@ -152,30 +161,26 @@ class StrandsLLMProvider(LLMProvider):
             callback_handler=None,
         )
 
-        # Create shared AsyncOpenAI client for health checks
-        # This reuses the same connection pool as Strands' internal client
         self._health_client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
         )
 
-        # Agent cache for invoke_with_system_and_user to avoid creating
-        # new agents on every request (prevents resource exhaustion)
         self._agent_cache: dict[str, Agent] = {}
 
     @property
     def model(self) -> OpenAIModel:
-        """Expose the underlying Strands model for direct use."""
+        """Return the default OpenAI model instance."""
         return self._model
 
     @property
     def model_id(self) -> str:
-        """Return the model ID."""
+        """Return the default model identifier."""
         return self._model_id
 
     @property
     def timeout_seconds(self) -> int:
-        """Return the timeout setting."""
+        """Return the LLM invocation timeout in seconds."""
         return self._timeout_seconds
 
     def _get_cached_agent(self, model: OpenAIModel, model_id: str, system_prompt: str) -> Agent:
@@ -232,7 +237,6 @@ class StrandsLLMProvider(LLMProvider):
         """
         start_time = asyncio.get_event_loop().time()
 
-        # Select model based on tier
         if model_tier == "cheap":
             model = self._cheap_model
             tier_model_id = self._cheap_model_id
@@ -248,8 +252,6 @@ class StrandsLLMProvider(LLMProvider):
         )
 
         try:
-            # Use cached agent to avoid resource exhaustion from creating
-            # new agents on every request
             agent = self._get_cached_agent(model, tier_model_id, system_message)
 
             async with asyncio.timeout(self._timeout_seconds):
@@ -302,7 +304,6 @@ class StrandsLLMProvider(LLMProvider):
                 model_id=tier_model_id,
                 execution_time_ms=elapsed_ms,
             )
-            # Re-raise CancelledError to allow proper task cleanup
             raise
         except ValidationError as error:
             elapsed_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
@@ -372,7 +373,7 @@ class StrandsLLMProvider(LLMProvider):
         difficulty_level: str | None,
         correlation_id: str,
     ) -> QuestionBatch:
-        """Generate structured (MCQ) questions."""
+        """Generate structured (MCQ) questions using the legacy workflow."""
         del correlation_id  # Used for tracing via telemetry
         return await self._generate(
             agent=self._structured_agent,
@@ -390,7 +391,7 @@ class StrandsLLMProvider(LLMProvider):
         difficulty_level: str | None,
         correlation_id: str,
     ) -> QuestionBatch:
-        """Generate non-structured (open-ended) questions."""
+        """Generate non-structured (open-ended) questions using the legacy workflow."""
         del correlation_id  # Used for tracing via telemetry
         return await self._generate(
             agent=self._non_structured_agent,
@@ -409,7 +410,6 @@ class StrandsLLMProvider(LLMProvider):
         - Unknown OpenAIError defaults to transient (safer to retry)
         - Non-OpenAI exceptions fall back to string heuristics.
         """
-        # Permanent OpenAI client errors
         if isinstance(
             error,
             (
@@ -426,7 +426,6 @@ class StrandsLLMProvider(LLMProvider):
                 error=str(error),
             )
 
-        # Transient OpenAI server / network errors
         if isinstance(
             error,
             (APIError, APIConnectionError, APITimeoutError, RateLimitError, OpenAIError),
@@ -437,7 +436,6 @@ class StrandsLLMProvider(LLMProvider):
                 model=self._model_id,
             )
 
-        # Fallback for non-OpenAI exceptions (e.g. from Strands internals)
         message = str(error).lower()
         if (
             "rate limit" in message
@@ -490,7 +488,6 @@ class StrandsLLMProvider(LLMProvider):
         """Convert a Strands result into a question batch."""
         structured_output = result.structured_output
 
-        # Debug: Log what we got back from Strands
         logger.info(
             "strands_generation_result",
             has_structured_output=structured_output is not None,
@@ -517,7 +514,6 @@ class StrandsLLMProvider(LLMProvider):
                 else None,
             )
 
-        # Validate output doesn't contain garbage (JVM text, log output, etc.)
         raw_str = str(result.raw_output) if hasattr(result, "raw_output") else ""
         if "JVM" in raw_str or "Method overriding" in raw_str or "Tool #" in raw_str:
             raise LLMTransientError(
@@ -530,11 +526,9 @@ class StrandsLLMProvider(LLMProvider):
         questions: list[QuestionDraft] = []
         skipped_count = 0
         for item in structured_output.questions[:count]:
-            # Skip questions without required fields
             if item.question_text is None:
                 skipped_count += 1
                 continue
-            # Use placeholder if answer missing (legacy path) - 3-prompt workflow adds real answers
             answer = item.answer_text or "[Answer to be generated]"
             questions.append(
                 QuestionDraft(
@@ -581,7 +575,6 @@ class StrandsLLMProvider(LLMProvider):
         difficulty_level: str | None,
         question_type: QuestionType,
     ) -> QuestionBatch:
-        """Internal generation method."""
         prompt = build_user_prompt(
             context=context,
             count=count,
@@ -615,11 +608,9 @@ class StrandsLLMProvider(LLMProvider):
                 await self._health_client.models.list()
             return True
         except AuthenticationError:
-            # Authentication failure means misconfiguration - unhealthy
             logger.error("llm_health_check_failed", error="authentication_failed")
             return False
         except NotFoundError:
-            # Model not found means invalid configuration - unhealthy
             logger.error("llm_health_check_failed", error="model_not_found")
             return False
         except (OpenAIError, OSError, TimeoutError) as error:
@@ -627,11 +618,7 @@ class StrandsLLMProvider(LLMProvider):
             return False
 
     async def shutdown(self) -> None:
-        """Close the health check client and release resources.
-
-        This should be called during container shutdown to properly
-        close the AsyncOpenAI client connection pool.
-        """
+        """Close the health check client."""
         try:
             await self._health_client.close()
             logger.debug("strands_provider_shutdown_complete")
@@ -654,7 +641,6 @@ class StrandsLLMProvider(LLMProvider):
         """Generate questions using a pre-compiled prompt from Langfuse."""
         del correlation_id  # Used for tracing via telemetry
 
-        # Select agent based on question type
         if question_type == "structured":
             agent = self._structured_agent
             qt = QuestionType.STRUCTURED

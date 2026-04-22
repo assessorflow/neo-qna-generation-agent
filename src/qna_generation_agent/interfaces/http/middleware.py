@@ -34,25 +34,20 @@ def _get_cors_origin_header(
     Security: Returns no origin header if request origin is not in allowed list.
     Empty allowed_origins means no CORS restrictions (development mode).
     """
-    # No restrictions configured - development mode, allow any origin
     if not allowed_origins:
         return (b"access-control-allow-origin", b"*")
 
-    # Specific origins configured - validate request origin
     if request_origin is None:
         return (b"access-control-allow-origin", b"")
 
     decoded_origin = request_origin.decode("utf-8", errors="replace")
 
-    # Check for wildcard (not recommended for production with credentials)
     if "*" in allowed_origins and not allow_credentials:
         return (b"access-control-allow-origin", b"*")
 
-    # Exact match required when credentials are used or specific origins listed
     if decoded_origin in allowed_origins:
         return (b"access-control-allow-origin", request_origin)
 
-    # Origin not allowed - return empty (browser will block)
     return (b"access-control-allow-origin", b"")
 
 
@@ -67,7 +62,6 @@ def _resolve_request_id(request: Request) -> str:
 
 def _resolve_trace_id(request: Request) -> str | None:
     """Extract trace ID from request headers if present."""
-    # Check common trace header formats
     for header in [b"x-trace-id", b"trace-id", b"x-b3-traceid"]:
         raw = request.get_first_header(header)
         if raw is not None:
@@ -77,7 +71,6 @@ def _resolve_trace_id(request: Request) -> str | None:
 
 def _get_request_id_from_context() -> str | None:
     """Get request_id from structlog context if available."""
-    # Import locally to avoid circular imports at module level
     import structlog
 
     ctx = structlog.contextvars.get_contextvars()
@@ -162,8 +155,6 @@ async def error_middleware(request: Request, handler: Handler) -> Response:
             status=400,
         )
     except AppError as error:
-        # Use request_id and trace_id from context if available (set by correlation_middleware),
-        # otherwise resolve from headers.
         request_id = _get_request_id_from_context() or _resolve_request_id(request)
         status = _map_error_to_status(error)
         logger.error(
@@ -180,7 +171,6 @@ async def error_middleware(request: Request, handler: Handler) -> Response:
             ).model_dump(mode="json"),
             status=status,
         )
-        # Add Retry-After header for transient errors
         if isinstance(error, TransientError) and error.retry_after_seconds:
             response.add_header(
                 b"retry-after", str(error.retry_after_seconds).encode("utf-8")

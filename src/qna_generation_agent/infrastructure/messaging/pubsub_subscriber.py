@@ -54,6 +54,12 @@ class PubSubSubscriptionWorker:
     """Async subscriber runtime using SubscriberClient with asyncio futures."""
 
     def __init__(self, config: SubscriptionConfig, handler: TriggerHandler) -> None:
+        """Initialize the Pub/Sub subscription worker.
+
+        Args:
+            config: Subscription configuration.
+            handler: Async handler for triggered events.
+        """
         self._config = config
         self._handler = handler
         self._subscriber: SubscriberClient | None = None
@@ -191,7 +197,6 @@ class PubSubSubscriptionWorker:
         Schedules async message handling in the event loop.
         Checks shutdown state safely and handles event loop lifecycle edge cases.
         """
-        # Fast-path check for shutdown state (non-blocking, may have false negatives)
         if self._shutting_down:
             nack_method = getattr(message, "nack", None)
             if nack_method:
@@ -203,7 +208,6 @@ class PubSubSubscriptionWorker:
             return
 
         if self._loop is None or self._loop.is_closed():
-            # Event loop not available or closed - nack and return
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 nack_method()
@@ -218,7 +222,6 @@ class PubSubSubscriptionWorker:
                 self._handle_message(message), self._loop
             )
         except RuntimeError as e:
-            # Event loop may have closed between check and schedule
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 nack_method()
@@ -229,14 +232,11 @@ class PubSubSubscriptionWorker:
             )
             return
 
-        # Block until completion for backpressure
         try:
             future.result()
         except (FutureCancelledError, asyncio.CancelledError):
-            # Propagate cancellation for proper shutdown
             raise
         except Exception:
-            # Log but don't propagate - _handle_message handles ack/nack
             logger.exception(
                 "message_handler_failed_in_callback",
                 message_id=getattr(message, "message_id", "unknown"),
@@ -262,6 +262,7 @@ class PubSubSubscriptionWorker:
         msg_id = getattr(message, "message_id", "unknown")
 
         async def extend_loop() -> None:
+            """Background loop to extend message ack deadlines."""
             while True:
                 await asyncio.sleep(interval)
                 try:
@@ -287,7 +288,6 @@ class PubSubSubscriptionWorker:
         msg_id = getattr(message, "message_id", "unknown")
         bind_context(message_id=msg_id)
 
-        # Start ack deadline extension for long-running LLM calls
         extend_task = await self._extend_ack_deadline(message)
 
         try:
@@ -302,7 +302,6 @@ class PubSubSubscriptionWorker:
             )
             receipt = await self._handler(envelope.to_domain_event())
 
-            # Ack the message on success
             ack_method = getattr(message, "ack", None)
             if ack_method:
                 await asyncio.to_thread(ack_method)
@@ -318,7 +317,6 @@ class PubSubSubscriptionWorker:
             PermanentError,
             IdempotencyConflict,
         ) as error:
-            # Ack permanent errors and duplicates (don't retry)
             ack_method = getattr(message, "ack", None)
             if ack_method:
                 await asyncio.to_thread(ack_method)
@@ -328,13 +326,11 @@ class PubSubSubscriptionWorker:
                 error_type=error.__class__.__name__,
             )
         except asyncio.CancelledError:
-            # Re-raise cancellation for proper shutdown handling
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)
             raise
         except (TransientError, StorageTransientError, LLMTransientError) as error:
-            # Nack transient errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)
@@ -345,7 +341,6 @@ class PubSubSubscriptionWorker:
                 retry_after_seconds=getattr(error, "retry_after_seconds", None),
             )
         except Exception:
-            # Nack unexpected errors (allow retry)
             nack_method = getattr(message, "nack", None)
             if nack_method:
                 await asyncio.to_thread(nack_method)

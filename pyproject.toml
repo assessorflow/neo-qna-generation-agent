@@ -11,16 +11,18 @@ license = { text = "MIT" }
 requires-python = ">=3.13"
 dependencies = [
     "blacksheep>=2.6",
+    "essentials-openapi>=1.4",
     "granian[reload]>=2.7",
     "google-cloud-pubsub>=2.37",
     "grpcio>=1.80",
     "langfuse>=4.2",
+    "openai>=2.32",
     "orjson>=3.11",
+    "protobuf>=6.31.1,<7.0.0",
     "strands-agents[openai]>=1.35",
     "structlog>=25.5",
     "pydantic>=2.13",
     "pydantic-settings>=2.13",
-    "openai>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +40,7 @@ lint = [
     "ruff>=0.15",
 ]
 audit = [
+    "codeaudit>=1.6",
     "pip-audit>=2.10",
 ]
 

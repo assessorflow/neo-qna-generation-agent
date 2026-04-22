@@ -298,6 +298,7 @@ class Settings(BaseSettings):
 
     @property
     def langfuse_enabled(self) -> bool:
+        """Return True if Langfuse credentials are configured."""
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
 
     @property
@@ -307,6 +308,7 @@ class Settings(BaseSettings):
 
     @property
     def worker_ready(self) -> bool:
+        """Return True if all required worker configuration is present."""
         return all(
             (
                 self.pubsub_project_id,
@@ -318,6 +320,7 @@ class Settings(BaseSettings):
 
     @property
     def is_development(self) -> bool:
+        """Return True if running in local or dev environment."""
         return self.environment in {RuntimeEnvironment.LOCAL, RuntimeEnvironment.DEV}
 
     @cached_property

@@ -100,6 +100,7 @@ class TriggerEnvelope(BaseModel):
         return value
 
     def to_domain_event(self) -> QnAGenerationTriggered:
+        """Convert the envelope to a domain event."""
         return QnAGenerationTriggered(
             event_id=self.event_id,
             workflow_id=self.workflow_id,
@@ -155,6 +156,7 @@ class CompletionEnvelope(BaseModel):
 
     @classmethod
     def from_domain_event(cls, event: QnAGenerationCompleted) -> CompletionEnvelope:
+        """Create an envelope from a domain completion event."""
         return cls(
             event_id=event.event_id,
             event_type=COMPLETED_EVENT_TYPE,
@@ -169,11 +171,6 @@ class CompletionEnvelope(BaseModel):
                 iteration=event.iteration,
             ),
         )
-
-
-# =============================================================================
-# Audit Events per spec
-# =============================================================================
 
 
 class DecisionAuditInputSummary(BaseModel):

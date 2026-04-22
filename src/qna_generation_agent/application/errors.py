@@ -21,6 +21,7 @@ class TransientError(AppError):
         retry_after_seconds: int | None = None,
         **context: Any,
     ) -> None:
+        """Initialize with retry guidance."""
         super().__init__(message, retry_after_seconds=retry_after_seconds, **context)
         self.retry_after_seconds = retry_after_seconds
 
@@ -33,6 +34,7 @@ class IdempotencyConflict(AppError):
     """Raised when a completed event is replayed."""
 
     def __init__(self, message: str, *, event_id: str, **context: Any) -> None:
+        """Initialize with the conflicting event identifier."""
         super().__init__(message, event_id=event_id, **context)
         self.event_id = event_id
 
@@ -56,6 +58,7 @@ class WorkflowEscalationError(PermanentError):
     def __init__(
         self, message: str, *, iteration: int, max_iterations: int, **context: Any
     ) -> None:
+        """Initialize with iteration context for escalation."""
         super().__init__(
             message, iteration=iteration, max_iterations=max_iterations, **context
         )

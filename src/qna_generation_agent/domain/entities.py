@@ -28,7 +28,7 @@ __all__ = [
 
 @dataclass(slots=True)
 class Answer:
-    """Represents a model answer."""
+    """Represents a model answer with optional explanation and references."""
 
     id: AnswerId
     text: str
@@ -38,6 +38,7 @@ class Answer:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
+        """Validate answer invariants."""
         if not self.text.strip():
             raise ValidationError("Answer text cannot be empty")
         if (
@@ -49,7 +50,7 @@ class Answer:
 
 @dataclass(slots=True)
 class Question:
-    """Represents a generated question."""
+    """Represents an assessment question with its answer and metadata."""
 
     id: QuestionId
     text: str
@@ -61,13 +62,14 @@ class Question:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
+        """Validate question invariants."""
         if not self.text.strip():
             raise ValidationError("Question text cannot be empty")
 
 
 @dataclass(slots=True)
 class QuestionSet:
-    """Represents one persisted generation output."""
+    """Aggregate root representing a collection of questions for an assessment."""
 
     id: str
     assessment_id: str
@@ -78,6 +80,7 @@ class QuestionSet:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
+        """Validate question set invariants."""
         if not self.id.strip():
             raise ValidationError("QuestionSet id cannot be empty")
         if not self.assessment_id.strip():
@@ -102,6 +105,7 @@ class QuestionSet:
         self.status = target
 
     def mark_in_progress(self) -> None:
+        """Transition the question set to in-progress status."""
         self._transition_to(
             GenerationStatus.IN_PROGRESS,
             {GenerationStatus.PENDING},
@@ -109,6 +113,7 @@ class QuestionSet:
         )
 
     def mark_completed(self) -> None:
+        """Transition the question set to completed status."""
         self._transition_to(
             GenerationStatus.COMPLETED,
             {GenerationStatus.IN_PROGRESS},
@@ -116,6 +121,7 @@ class QuestionSet:
         )
 
     def mark_failed(self) -> None:
+        """Transition the question set to failed status."""
         self._transition_to(
             GenerationStatus.FAILED,
             {GenerationStatus.PENDING, GenerationStatus.IN_PROGRESS},
@@ -167,6 +173,7 @@ class GenerationRequest:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
+        """Validate generation request invariants."""
         if not self.id.strip():
             raise ValidationError("GenerationRequest id cannot be empty")
         if not self.assessment_id.strip():
