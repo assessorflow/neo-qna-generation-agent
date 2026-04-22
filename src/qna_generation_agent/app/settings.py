@@ -185,6 +185,11 @@ class Settings(BaseSettings):
             "QA_GEN_MAX_ITERATIONS", "QNA_QA_GEN_MAX_ITERATIONS"
         ),
     )
+    swarm_size: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices("QNA_SWARM_SIZE", "SWARM_SIZE"),
+    )
 
     submission_service_url: str = Field(validation_alias="SUBMISSION_SERVICE_URL")
     knowledge_service_url: str = Field(validation_alias="KNOWLEDGE_SERVICE_URL")

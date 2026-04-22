@@ -3,10 +3,12 @@
 
 import re
 import sys
+from typing import Any
+
 from pathlib import Path
 
 
-def parse_codeaudit_html(html_path: str) -> dict:
+def parse_codeaudit_html(html_path: str) -> dict[str, Any]:
     with open(html_path) as f:
         html = f.read()
 
