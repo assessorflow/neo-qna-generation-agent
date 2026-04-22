@@ -42,10 +42,16 @@ class Prompt:
             name=self.name,
             version=self.version,
             system_prompt=_compile_text(
-                self.system_prompt, prompt_name=self.name, version=self.version, **variables
+                self.system_prompt,
+                prompt_name=self.name,
+                version=self.version,
+                **variables,
             ),
             user_prompt=_compile_text(
-                self.user_prompt, prompt_name=self.name, version=self.version, **variables
+                self.user_prompt,
+                prompt_name=self.name,
+                version=self.version,
+                **variables,
             ),
             aliases=self.aliases,
             metadata=self.metadata,
@@ -57,7 +63,9 @@ def _detect_unresolved(content: str) -> list[str]:
     return re.findall(r"\{\{[\w.]+\}\}", content)
 
 
-def _compile_text(content: str, *, prompt_name: str, version: str, **variables: Any) -> str:
+def _compile_text(
+    content: str, *, prompt_name: str, version: str, **variables: Any
+) -> str:
     """Compile a prompt section with variable substitution."""
     result = content
     for key, value in variables.items():

@@ -156,7 +156,9 @@ def _build_llm(settings: Settings, model_id: str) -> LLMProvider:
         timeout_seconds=settings.llm_timeout_seconds,
         max_tokens=settings.openai_max_output_tokens,
         temperature=settings.openai_temperature,
-        cheap_model_id=settings.cheap_model_id if settings.cheap_model_enabled else None,
+        cheap_model_id=settings.cheap_model_id
+        if settings.cheap_model_enabled
+        else None,
         expensive_model_id=settings.expensive_model_id,
     )
 

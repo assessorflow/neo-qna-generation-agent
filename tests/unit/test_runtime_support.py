@@ -139,9 +139,7 @@ class FakeLLMProvider(LLMProvider):
         """Return True for bootstrap tests."""
         return True
 
-    async def invoke_with_system_and_user[
-        T: BaseModel
-    ](
+    async def invoke_with_system_and_user[T: BaseModel](
         self,
         system_message: str,
         user_message: str,

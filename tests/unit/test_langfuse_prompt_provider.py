@@ -30,9 +30,7 @@ async def test_local_prompt_provider_resolves_aliases() -> None:
     assert item_prompt.name == "item-writer"
     assert item_prompt.version_string == "item-writer@v1"
     assert "Assessment Generator" in item_prompt.aliases
-    assert item_prompt.metadata["description"].startswith(
-        "Generate a mixed assessment"
-    )
+    assert item_prompt.metadata["description"].startswith("Generate a mixed assessment")
 
     assert options_prompt.name == "options-only-writer"
     assert options_prompt.version_string == "options-only-writer@v1"

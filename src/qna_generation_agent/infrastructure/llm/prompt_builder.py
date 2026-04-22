@@ -20,7 +20,9 @@ def format_chunks_for_prompt(chunks: list[str]) -> str:
     Returns:
         Formatted string with each chunk labeled by index.
     """
-    return "\n\n".join(f"[Chunk {i}] {chunk}" for i, chunk in enumerate(chunks, start=1))
+    return "\n\n".join(
+        f"[Chunk {i}] {chunk}" for i, chunk in enumerate(chunks, start=1)
+    )
 
 
 class GeneratedQuestionSchema(BaseModel):
@@ -237,8 +239,12 @@ class MCQExplanationOutputSchema(BaseModel):
         if isinstance(value, str):
             if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
                 return value
-            raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
-        raise ValueError(f"CEFR level must be a string or None, got {type(value).__name__}")
+            raise ValueError(
+                f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2"
+            )
+        raise ValueError(
+            f"CEFR level must be a string or None, got {type(value).__name__}"
+        )
 
 
 class MCQAnswerGeneratorOutputSchema(BaseModel):
@@ -300,8 +306,12 @@ class MCQAnswerGeneratorOutputSchema(BaseModel):
         if isinstance(value, str):
             if re.match(r"^(A1|A2|B1|B2|C1|C2)$", value):
                 return value
-            raise ValueError(f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2")
-        raise ValueError(f"CEFR level must be a string or None, got {type(value).__name__}")
+            raise ValueError(
+                f"Invalid CEFR level: {value!r}. Must be one of: A1, A2, B1, B2, C1, C2"
+            )
+        raise ValueError(
+            f"CEFR level must be a string or None, got {type(value).__name__}"
+        )
 
     @field_validator("l1_considerations", mode="before")
     @classmethod
@@ -433,9 +443,7 @@ class AssessmentGeneratorOutputSchema(BaseModel):
 
     @field_validator("questions", mode="before")
     @classmethod
-    def _ensure_questions_list(
-        cls, value: object
-    ) -> list[dict[str, object]]:
+    def _ensure_questions_list(cls, value: object) -> list[dict[str, object]]:
         """Ensure questions is a valid list, handling LLM output edge cases.
 
         Handles cases where LLM returns:
@@ -448,7 +456,9 @@ class AssessmentGeneratorOutputSchema(BaseModel):
         if isinstance(value, dict):
             # LLM might return {0: {...}, 1: {...}} or single question as dict
             # Try to convert dict values to list if keys look numeric
-            if all(isinstance(k, (int, str)) and str(k).isdigit() for k in value.keys()):
+            if all(
+                isinstance(k, (int, str)) and str(k).isdigit() for k in value.keys()
+            ):
                 return list(value.values())
             # Single question returned as dict
             return [value]

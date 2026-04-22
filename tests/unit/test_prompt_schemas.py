@@ -176,7 +176,12 @@ class TestAssessmentGeneratorOutputSchema:
             "content": "What is the answer?",
             "structured_answer": "A",
             "metadata": {
-                "options": {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"},
+                "options": {
+                    "A": "Option A",
+                    "B": "Option B",
+                    "C": "Option C",
+                    "D": "Option D",
+                },
                 "source_chunk_ids": ["chunk-001"],
                 "difficulty": "medium",
                 "topic": "Grammar",

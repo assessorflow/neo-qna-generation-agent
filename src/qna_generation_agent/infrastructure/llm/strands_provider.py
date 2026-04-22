@@ -185,7 +185,9 @@ class StrandsLLMProvider(LLMProvider):
         """Return the LLM invocation timeout in seconds."""
         return self._timeout_seconds
 
-    def _get_cached_agent(self, model: OpenAIModel, model_id: str, system_prompt: str) -> Agent:
+    def _get_cached_agent(
+        self, model: OpenAIModel, model_id: str, system_prompt: str
+    ) -> Agent:
         """Get or create a cached Agent for the given model and system prompt.
 
         Args:
@@ -430,7 +432,13 @@ class StrandsLLMProvider(LLMProvider):
 
         if isinstance(
             error,
-            (APIError, APIConnectionError, APITimeoutError, RateLimitError, OpenAIError),
+            (
+                APIError,
+                APIConnectionError,
+                APITimeoutError,
+                RateLimitError,
+                OpenAIError,
+            ),
         ):
             return LLMTransientError(
                 "LLM request failed temporarily",
@@ -710,8 +718,7 @@ class StrandsLLMProvider(LLMProvider):
         """Generate one candidate batch using a small swarm."""
 
         generator_prompt = (
-            f"{system_message}\n\n"
-            f"Quality focus: {focus}. Generate one candidate batch."
+            f"{system_message}\n\nQuality focus: {focus}. Generate one candidate batch."
         )
         reviewer_prompt = (
             f"{system_message}\n\n"

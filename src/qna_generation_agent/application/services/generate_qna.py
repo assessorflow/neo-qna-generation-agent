@@ -271,7 +271,10 @@ class GenerateQnAService:
             iteration=command.iteration,
         )
 
-        if command.question_set_id and command.validation_result == ValidationResult.FAIL:
+        if (
+            command.question_set_id
+            and command.validation_result == ValidationResult.FAIL
+        ):
             next_iteration = (command.iteration or 1) + 1
             if next_iteration > self._max_iterations:
                 raise WorkflowEscalationError(
@@ -384,7 +387,10 @@ class GenerateQnAService:
             )
 
         iteration = command.iteration or 1
-        if command.question_set_id and command.validation_result == ValidationResult.FAIL:
+        if (
+            command.question_set_id
+            and command.validation_result == ValidationResult.FAIL
+        ):
             # Regeneration flow: increment iteration via gRPC, then generate
             question_set_id = command.question_set_id
             logger.info(
@@ -509,34 +515,41 @@ class GenerateQnAService:
             if self._telemetry is not None
             else nullcontext()
         ):
-            if command.question_set_id and command.validation_result == ValidationResult.FAIL:
-                assessment_questions, prompt_version = (
-                    await self._generate_regeneration_assessment_questions(
-                        context=context,
-                        question_set_id=question_set_id,
-                        structured_count=structured_count,
-                        non_structured_count=non_structured_count,
-                        difficulty_level=difficulty_level,
-                        correlation_id=request.correlation_id,
-                    )
+            if (
+                command.question_set_id
+                and command.validation_result == ValidationResult.FAIL
+            ):
+                (
+                    assessment_questions,
+                    prompt_version,
+                ) = await self._generate_regeneration_assessment_questions(
+                    context=context,
+                    question_set_id=question_set_id,
+                    structured_count=structured_count,
+                    non_structured_count=non_structured_count,
+                    difficulty_level=difficulty_level,
+                    correlation_id=request.correlation_id,
                 )
             else:
-                assessment_questions, prompt_version = (
-                    await self._generate_initial_assessment_questions(
-                        context=context,
-                        structured_count=structured_count,
-                        non_structured_count=non_structured_count,
-                        difficulty_level=difficulty_level,
-                        correlation_id=request.correlation_id,
-                    )
+                (
+                    assessment_questions,
+                    prompt_version,
+                ) = await self._generate_initial_assessment_questions(
+                    context=context,
+                    structured_count=structured_count,
+                    non_structured_count=non_structured_count,
+                    difficulty_level=difficulty_level,
+                    correlation_id=request.correlation_id,
                 )
 
             for idx, question in enumerate(assessment_questions):
                 if question.question_type == "structured":
-                    final_question = await self._generate_structured_question_three_prompt(
-                        question=question,
-                        difficulty_level=request.difficulty_level,
-                        question_index=idx,
+                    final_question = (
+                        await self._generate_structured_question_three_prompt(
+                            question=question,
+                            difficulty_level=request.difficulty_level,
+                            question_index=idx,
+                        )
                     )
                     if final_question is not None:
                         question_set.add_question(final_question)
@@ -558,7 +571,9 @@ class GenerateQnAService:
                 )
 
         structured_generated = sum(
-            1 for q in question_set.questions if q.question_type is QuestionType.STRUCTURED
+            1
+            for q in question_set.questions
+            if q.question_type is QuestionType.STRUCTURED
         )
         non_structured_generated = sum(
             1
@@ -748,7 +763,9 @@ class GenerateQnAService:
             try:
                 # Estimate tokens (rough approximation)
                 prompt_tokens = len(all_chunks) * 200  # Rough estimate
-                completion_tokens = (structured_generated + non_structured_generated) * 100
+                completion_tokens = (
+                    structured_generated + non_structured_generated
+                ) * 100
                 await self._event_publisher.publish_token_usage(
                     TokenUsageEvent(
                         workflow_id=command.workflow_id,
@@ -903,9 +920,11 @@ class GenerateQnAService:
             "topic_id", ""
         )
         source_chunk_ids = metadata_source.get("source_chunk_ids", [])
-        references = [str(chunk_id) for chunk_id in source_chunk_ids] if isinstance(
-            source_chunk_ids, list
-        ) else []
+        references = (
+            [str(chunk_id) for chunk_id in source_chunk_ids]
+            if isinstance(source_chunk_ids, list)
+            else []
+        )
         source_question_id = getattr(question, "question_id", None)
 
         return DomainQuestion(
@@ -962,7 +981,10 @@ class GenerateQnAService:
 
         score -= abs(structured_count - structured_seen) * 8
         score -= abs(non_structured_count - non_structured_seen) * 4
-        if structured_seen == structured_count and non_structured_seen == non_structured_count:
+        if (
+            structured_seen == structured_count
+            and non_structured_seen == non_structured_count
+        ):
             score += 15
         return score
 
@@ -1085,7 +1107,9 @@ class GenerateQnAService:
             )
 
         if self._prompt_provider is not None:
-            options_prompt = await self._prompt_provider.get_options_only_writer_prompt()
+            options_prompt = (
+                await self._prompt_provider.get_options_only_writer_prompt()
+            )
             feedback_prompt = await self._prompt_provider.get_feedback_writer_prompt()
             prompt_version = (
                 f"{options_prompt.version_string}+{feedback_prompt.version_string}"
@@ -1325,7 +1349,9 @@ class GenerateQnAService:
             options_dict[distractor.option_letter] = distractor.option_text
 
         if self._prompt_provider is not None:
-            explanation_prompt = await self._prompt_provider.get_feedback_writer_prompt()
+            explanation_prompt = (
+                await self._prompt_provider.get_feedback_writer_prompt()
+            )
             compiled_explanation_prompt = explanation_prompt.compile(
                 question_text=answer_result.question_stem,
                 topic="mixed L1 students",
@@ -1340,15 +1366,17 @@ class GenerateQnAService:
             explanation_user_msg = compiled_explanation_prompt.user_prompt
         else:
             explanation_system_msg = build_system_prompt(QuestionType.STRUCTURED)
-            explanation_user_msg = user_prompt_builder.build_mcq_explanation_generator_prompt(
-                question_text=answer_result.question_stem,
-                topic="mixed L1 students",
-                correct_answer=answer_result.correct_answer.option_letter,
-                option_a=options_dict.get("A", ""),
-                option_b=options_dict.get("B", ""),
-                option_c=options_dict.get("C", ""),
-                option_d=options_dict.get("D", ""),
-                chunk_content="mixed L1 students",
+            explanation_user_msg = (
+                user_prompt_builder.build_mcq_explanation_generator_prompt(
+                    question_text=answer_result.question_stem,
+                    topic="mixed L1 students",
+                    correct_answer=answer_result.correct_answer.option_letter,
+                    option_a=options_dict.get("A", ""),
+                    option_b=options_dict.get("B", ""),
+                    option_c=options_dict.get("C", ""),
+                    option_d=options_dict.get("D", ""),
+                    chunk_content="mixed L1 students",
+                )
             )
 
         explanation_provider = self._get_provider_for_stage(
@@ -1358,11 +1386,13 @@ class GenerateQnAService:
         # Wrap MCQ Explanation Generator with stage timeout
         try:
             async with asyncio.timeout(GENERATION_STAGE_TIMEOUT_SECONDS):
-                explanation_result = await explanation_provider.invoke_with_system_and_user(
-                    system_message=explanation_system_msg,
-                    user_message=explanation_user_msg,
-                    structured_output_model=MCQExplanationOutputSchema,
-                    model_tier="cheap",
+                explanation_result = (
+                    await explanation_provider.invoke_with_system_and_user(
+                        system_message=explanation_system_msg,
+                        user_message=explanation_user_msg,
+                        structured_output_model=MCQExplanationOutputSchema,
+                        model_tier="cheap",
+                    )
                 )
         except TimeoutError:
             logger.warning(
@@ -1405,9 +1435,7 @@ class GenerateQnAService:
                 f"Analysis: {explanation_result.question_analysis}"
             )
             explanation_parts.append(f"CEFR Level: {explanation_result.cefr_level}")
-            explanation_parts.append(
-                f"Teaching Tip: {explanation_result.teaching_tip}"
-            )
+            explanation_parts.append(f"Teaching Tip: {explanation_result.teaching_tip}")
             for opt_exp in explanation_result.option_explanations:
                 explanation_parts.append(
                     f"{opt_exp.option_letter}: {opt_exp.explanation}"

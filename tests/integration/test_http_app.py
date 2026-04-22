@@ -72,9 +72,7 @@ class FakeLLMProvider(LLMProvider):
         """Return True for readiness probe tests."""
         return True
 
-    async def invoke_with_system_and_user[
-        T: BaseModel
-    ](
+    async def invoke_with_system_and_user[T: BaseModel](
         self,
         system_message: str,
         user_message: str,

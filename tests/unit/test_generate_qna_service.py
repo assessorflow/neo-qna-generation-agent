@@ -125,9 +125,7 @@ class FakeLLMProvider(LLMProvider):
         """Return True for tests."""
         return True
 
-    async def invoke_with_system_and_user[
-        T: BaseModel
-    ](
+    async def invoke_with_system_and_user[T: BaseModel](
         self,
         system_message: str,
         user_message: str,
@@ -268,9 +266,7 @@ class SwarmAwareFakeLLMProvider(FakeLLMProvider):
         self.swarm_sizes.append(swarm_size)
         return self._candidates
 
-    async def invoke_with_system_and_user[
-        T: BaseModel
-    ](
+    async def invoke_with_system_and_user[T: BaseModel](
         self,
         system_message: str,
         user_message: str,
@@ -1065,7 +1061,9 @@ async def test_execute_raises_transient_error_on_write_failure() -> None:
 
 
 @pytest.mark.unit
-async def test_execute_best_effort_publish_failure_does_not_corrupt_idempotency() -> None:
+async def test_execute_best_effort_publish_failure_does_not_corrupt_idempotency() -> (
+    None
+):
     """Test that best-effort publish failure does not corrupt idempotency status.
 
     After the submission service successfully persists questions, idempotency
@@ -1387,9 +1385,7 @@ async def test_mcq_option_letter_preservation_non_a_correct() -> None:
 
     # LLM provider that returns C as the correct answer (not A)
     class NonACorrectLLMProvider(FakeLLMProvider):
-        async def invoke_with_system_and_user[
-            T: BaseModel
-        ](
+        async def invoke_with_system_and_user[T: BaseModel](
             self,
             system_message: str,
             user_message: str,
