@@ -1,7 +1,7 @@
-"""User prompt builder for the 3-prompt workflow.
+"""User prompt builder for the legacy 3-prompt workflow.
 
 Builds dynamic user prompts from templates with variable substitution.
-System prompts are fetched separately from Langfuse as static text.
+Local prompt assets now provide the primary prompt templates.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ Return your response as a JSON object matching the MCQExplanationOutputSchema st
 class UserPromptBuilder:
     """Builds user prompts from templates for the 3-prompt workflow.
 
-    User prompts are built in code (not fetched from Langfuse) and contain
+    User prompts are built in code for the legacy fallback path and contain
     the dynamic, request-specific content for each LLM call.
     """
 

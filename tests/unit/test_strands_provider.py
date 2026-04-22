@@ -26,10 +26,18 @@ class FakeAgent:
     responses: ClassVar[list[Any]] = []
 
     def __init__(
-        self, model: object, system_prompt: str, callback_handler: object = None
+        self,
+        model: object,
+        system_prompt: str,
+        callback_handler: object = None,
+        structured_output_model: object = None,
+        name: str | None = None,
+        state: object = None,
+        **kwargs: Any,
     ) -> None:
-        del model, callback_handler
+        del model, callback_handler, structured_output_model, state, kwargs
         self.system_prompt = system_prompt
+        self.name = name
 
     async def invoke_async(
         self, prompt: str, structured_output_model: object
@@ -56,6 +64,32 @@ class FakeOpenAIModel:
         self.client_args = client_args
         self.model_id = model_id
         self.params = params or {}
+
+
+class FakeSwarm:
+    """Fake swarm that returns structured outputs for each invocation."""
+
+    responses: ClassVar[list[Any]] = []
+    call_count: ClassVar[int] = 0
+
+    def __init__(self, nodes: list[object], **kwargs: Any) -> None:
+        del nodes, kwargs
+
+    async def invoke_async(
+        self, task: str, invocation_state: dict[str, Any] | None = None, **kwargs: Any
+    ) -> object:
+        del task, invocation_state, kwargs
+        response = self.responses.pop(0)
+        index = self.call_count
+        self.call_count += 1
+        return SimpleNamespace(
+            status="completed",
+            results={
+                f"assessment_reviewer_{index}": SimpleNamespace(
+                    result=SimpleNamespace(structured_output=response)
+                )
+            },
+        )
 
 
 def _provider(monkeypatch: pytest.MonkeyPatch) -> StrandsLLMProvider:
@@ -628,3 +662,77 @@ async def test_invoke_with_system_and_user_raises_on_invalid_output(
             user_message="User prompt",
             structured_output_model=AssessmentGeneratorOutputSchema,
         )
+
+
+@pytest.mark.unit
+async def test_generate_swarm_candidates_returns_all_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Swarm candidate generation should return each candidate schema."""
+    FakeSwarm.responses = [
+        AssessmentGeneratorOutputSchema.model_validate(
+            {
+                "questions": [
+                    {
+                        "question_id": "q-1",
+                        "question_type": "structured",
+                        "question_text": "Candidate 1?",
+                        "answer_text": "A",
+                        "metadata": {
+                            "question_type": "structured",
+                            "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+                            "source_chunk_ids": ["chunk-1"],
+                            "difficulty": "easy",
+                            "topic": "Test",
+                        },
+                    }
+                ]
+            }
+        ),
+        AssessmentGeneratorOutputSchema.model_validate(
+            {
+                "questions": [
+                    {
+                        "question_id": "q-1",
+                        "question_type": "structured",
+                        "question_text": "Candidate 2?",
+                        "answer_text": "B",
+                        "metadata": {
+                            "question_type": "structured",
+                            "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+                            "source_chunk_ids": ["chunk-1"],
+                            "difficulty": "easy",
+                            "topic": "Test",
+                        },
+                    }
+                ]
+            }
+        ),
+    ]
+    FakeSwarm.call_count = 0
+    monkeypatch.setattr(provider_module, "Agent", FakeAgent)
+    monkeypatch.setattr(provider_module, "OpenAIModel", FakeOpenAIModel)
+    monkeypatch.setattr(provider_module, "Swarm", FakeSwarm)
+
+    provider = StrandsLLMProvider(
+        model_provider="openai",
+        model_id="gpt-4o-mini",
+        api_key="test-key",
+        base_url=None,
+        timeout_seconds=1,
+        cheap_model_id="gpt-3.5-turbo",
+        expensive_model_id="gpt-4o",
+    )
+
+    candidates = await provider.generate_swarm_candidates(
+        system_message="System prompt",
+        user_message="User prompt",
+        count=1,
+        difficulty_level=DifficultyLevel.MEDIUM,
+        correlation_id="corr_123",
+        swarm_size=2,
+    )
+
+    assert len(candidates) == 2
+    assert candidates[0].questions[0].question_text == "Candidate 1?"
+    assert candidates[1].questions[0].question_text == "Candidate 2?"

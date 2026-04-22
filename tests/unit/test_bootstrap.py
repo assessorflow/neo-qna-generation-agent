@@ -189,6 +189,14 @@ class TestSettingsProperties:
         settings = Settings()  # type: ignore[call-arg]
         assert settings.service_name == "qna-generation-agent"
 
+    def test_swarm_size_reads_env_var(self, monkeypatch: MonkeyPatch) -> None:
+        """swarm_size reads QNA_SWARM_SIZE."""
+        set_minimal_env(monkeypatch)
+        monkeypatch.setenv("QNA_SWARM_SIZE", "5")
+
+        settings = Settings()  # type: ignore[call-arg]
+        assert settings.swarm_size == 5
+
 
 @pytest.mark.unit
 class TestBootstrapContainer:
@@ -245,7 +253,7 @@ class TestBootstrapContainer:
         assert isinstance(container.event_publisher, NullEventPublisher)
 
     def test_build_container_without_langfuse(self, monkeypatch: MonkeyPatch) -> None:
-        """Container has no telemetry when Langfuse is not configured."""
+        """Container has no telemetry when prompt management is not configured."""
         set_minimal_env(monkeypatch)
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
@@ -369,23 +377,3 @@ class TestSettingsTimeoutValidation:
         settings = Settings()  # type: ignore[call-arg]
         assert settings.llm_timeout_seconds == 60
         assert settings.grpc_timeout_seconds == 30
-
-
-@pytest.mark.unit
-class TestSettingsTestRoutesPrerequisites:
-    """Tests for ENABLE_TEST_ROUTES prerequisites."""
-
-    def test_enable_test_routes_requires_langfuse(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
-        """ENABLE_TEST_ROUTES requires Langfuse to be configured."""
-        set_minimal_env(monkeypatch)
-        monkeypatch.setenv("ENABLE_TEST_ROUTES", "true")
-        # Explicitly clear Langfuse keys from .env file
-        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
-        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
-
-        settings = Settings()  # type: ignore[call-arg]
-        # Settings should load but prompt_test_service won't be created
-        assert settings.enable_test_routes is True
-        assert settings.langfuse_enabled is False

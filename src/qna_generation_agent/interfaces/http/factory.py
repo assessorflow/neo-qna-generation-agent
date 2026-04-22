@@ -22,9 +22,6 @@ from qna_generation_agent.interfaces.http.middleware import (
     request_logging_middleware,
 )
 from qna_generation_agent.interfaces.http.routes_health import register_health_routes
-from qna_generation_agent.interfaces.http.routes_prompts import (
-    register_prompt_test_routes,
-)
 
 logger = get_logger(__name__)
 
@@ -130,17 +127,6 @@ def create_blacksheep_app(
         logger.info("http_application_stopped")
 
     register_health_routes(application)
-
-    # Register prompt test routes in development or when explicitly enabled
-    # These routes require Langfuse configuration
-    if app_container.settings.is_development or getattr(
-        app_container.settings, "enable_test_routes", False
-    ):
-        register_prompt_test_routes(application)
-        logger.info(
-            "prompt_test_routes_registered",
-            is_development=app_container.settings.is_development,
-        )
 
     _configure_openapi(application)
     return application

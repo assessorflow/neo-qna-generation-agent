@@ -25,9 +25,11 @@ from qna_generation_agent.application.errors import (
 from qna_generation_agent.application.ports.idempotency import IdempotencyStatus
 from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.application.ports.prompt_provider import (
+    Prompt,
     PromptProvider,
 )
 from qna_generation_agent.application.ports.submission_client import (
+    AssessmentConfig,
     CreateQuestionSetCommand,
     IncrementIterationCommand,
     IncrementIterationResult,
@@ -245,6 +247,120 @@ class FakeLLMProvider(LLMProvider):
         )
 
 
+class SwarmAwareFakeLLMProvider(FakeLLMProvider):
+    """Fake provider that exposes swarm candidate generation."""
+
+    def __init__(self, candidates: list[Any]) -> None:
+        self._candidates = candidates
+        self.swarm_sizes: list[int] = []
+
+    async def generate_swarm_candidates(
+        self,
+        *,
+        system_message: str,
+        user_message: str,
+        count: int,
+        difficulty_level: str | None,
+        correlation_id: str,
+        swarm_size: int,
+    ) -> list[Any]:
+        del system_message, user_message, count, difficulty_level, correlation_id
+        self.swarm_sizes.append(swarm_size)
+        return self._candidates
+
+    async def invoke_with_system_and_user[
+        T: BaseModel
+    ](
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        structured_output_model: type[T],
+        model_tier: str = "expensive",
+    ) -> T | None:
+        if structured_output_model == MCQAnswerGeneratorOutputSchema:
+            import re
+
+            match = re.search(r"Question:\s*(.*?)\nTopic:", user_message, re.S)
+            stem = match.group(1).strip() if match else "Test question stem?"
+            return MCQAnswerGeneratorOutputSchema(  # type: ignore[return-value]
+                question_stem=stem,
+                correct_answer=MCQDistractorExplanationSchema(
+                    option_letter="A",
+                    option_text="Correct answer",
+                    is_correct=True,
+                    explanation="This is correct",
+                ),
+                distractors=[
+                    MCQDistractorExplanationSchema(
+                        option_letter="B",
+                        option_text="Distractor 1",
+                        is_correct=False,
+                        explanation="This is wrong",
+                    ),
+                    MCQDistractorExplanationSchema(
+                        option_letter="C",
+                        option_text="Distractor 2",
+                        is_correct=False,
+                        explanation="This is wrong",
+                    ),
+                    MCQDistractorExplanationSchema(
+                        option_letter="D",
+                        option_text="Distractor 3",
+                        is_correct=False,
+                        explanation="This is wrong",
+                    ),
+                ],
+                grammar_point_tested="test grammar",
+                difficulty_justification="test difficulty",
+                l1_considerations=["L1 interference 1"],
+            )
+
+        return await super().invoke_with_system_and_user(
+            system_message,
+            user_message,
+            structured_output_model=structured_output_model,
+            model_tier=model_tier,
+        )
+
+
+def _assessment_question(
+    *,
+    question_id: str,
+    question_type: str,
+    question_text: str,
+    answer_text: str,
+    explanation: str | None = None,
+) -> AssessmentQuestionSchema:
+    if question_type == "structured":
+        metadata = {
+            "question_type": "structured",
+            "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+            "source_chunk_ids": ["chunk-1"],
+            "difficulty": "medium",
+            "topic": "Test Topic",
+        }
+    else:
+        metadata = {
+            "question_type": "non_structured",
+            "source_chunk_ids": ["chunk-1"],
+            "difficulty": "medium",
+            "topic": "Test Topic",
+            "rubric": "Explain clearly",
+        }
+
+    payload: dict[str, Any] = {
+        "question_id": question_id,
+        "question_type": question_type,
+        "question_text": question_text,
+        "answer_text": answer_text,
+        "metadata": metadata,
+    }
+    if explanation is not None:
+        payload["explanation"] = explanation
+    return AssessmentQuestionSchema.model_validate(payload)
+
+
 class FakeTelemetry(TelemetryPort):
     """Telemetry stub that returns predictable trace IDs."""
 
@@ -431,6 +547,85 @@ async def test_execute_generates_and_publishes_receipt() -> None:
 
 
 @pytest.mark.unit
+async def test_execute_initial_trigger_uses_swarm_best_candidate() -> None:
+    publisher = RecordingPublisher()
+    submission_client = FakeSubmissionClient()
+    knowledge_client = FakeKnowledgeClient()
+
+    weak_candidate = AssessmentGeneratorOutputSchema(
+        questions=[
+            _assessment_question(
+                question_id="q-1",
+                question_type="structured",
+                question_text="Weak structured question?",
+                answer_text="A",
+            ),
+            _assessment_question(
+                question_id="q-2",
+                question_type="non_structured",
+                question_text="Weak open question?",
+                answer_text="Weak answer",
+            ),
+        ]
+    )
+    strong_candidate = AssessmentGeneratorOutputSchema(
+        questions=[
+            _assessment_question(
+                question_id="q-1",
+                question_type="structured",
+                question_text="Best structured question?",
+                answer_text="B",
+                explanation="Because the source chunk supports it.",
+            ),
+            _assessment_question(
+                question_id="q-2",
+                question_type="non_structured",
+                question_text="Best open question?",
+                answer_text="Best open answer",
+                explanation="Because the rubric is explicit.",
+            ),
+        ]
+    )
+
+    service = GenerateQnAService(
+        llm_provider=SwarmAwareFakeLLMProvider([weak_candidate, strong_candidate]),
+        question_set_repo=InMemoryQuestionSetRepository(),
+        idempotency_store=InMemoryIdempotencyStore(),
+        event_publisher=publisher,
+        submission_client=submission_client,
+        knowledge_client=knowledge_client,  # type: ignore
+        telemetry=FakeTelemetry(),
+        swarm_size=2,
+    )
+
+    receipt = await service.execute(
+        GenerationCommand(
+            request_id="evt_swarm_123",
+            workflow_id="wf_swarm_123",
+            correlation_id="corr_swarm_123",
+            trace_id=None,
+            assessment_id="assessment_swarm_123",
+            question_set_id="qs_swarm_123",
+            validation_result=None,
+            iteration=None,
+            structured_count=1,
+            non_structured_count=1,
+            difficulty_level="medium",
+            purpose="assessment",
+            feedback_issues=[],
+        )
+    )
+
+    assert receipt.question_count == 2
+    assert submission_client.questions_written[0].questions[0].content == (
+        "Best structured question?"
+    )
+    assert submission_client.questions_written[0].questions[1].content == (
+        "Best open question?"
+    )
+
+
+@pytest.mark.unit
 async def test_execute_returns_cached_receipt_for_completed_duplicate() -> None:
     """Test that completed duplicate events return the cached receipt."""
     publisher = RecordingPublisher()
@@ -472,18 +667,43 @@ async def test_execute_returns_cached_receipt_for_completed_duplicate() -> None:
 
 
 @pytest.mark.unit
-async def test_execute_with_prompt_provider_uses_langfuse() -> None:
-    """Test that prompt provider triggers Langfuse path when available."""
+async def test_execute_with_prompt_provider_uses_prompt_assets() -> None:
+    """Test that prompt provider is used when local prompt assets are available."""
 
     class FakePromptProvider(PromptProvider):
-        @property
-        def default_label(self) -> str:
-            return "production"
+        def __init__(self) -> None:
+            self.prompts_fetched: list[str] = []
 
-        async def get_system_prompt(
-            self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> str:
-            return f"System prompt for {name}"
+        async def get_prompt(self, name: str) -> Prompt:
+            self.prompts_fetched.append(name)
+            if name == PromptProvider.ITEM_WRITER_PROMPT_NAME:
+                return Prompt(
+                    name=name,
+                    version="1",
+                    system_prompt=f"System prompt for {name}",
+                    user_prompt=(
+                        "Generate {{structured_count}} structured and "
+                        "{{non_structured_count}} open-ended questions at "
+                        "{{difficulty}} difficulty about {{topics}} using {{chunks}}."
+                    ),
+                )
+            if name == PromptProvider.OPTIONS_ONLY_WRITER_PROMPT_NAME:
+                return Prompt(
+                    name=name,
+                    version="1",
+                    system_prompt=f"System prompt for {name}",
+                    user_prompt=(
+                        "Complete the following MCQ question by generating the correct "
+                        "answer and three plausible distractors.\n\nQuestion: {{question_text}}\n"
+                        "Topic: {{topic}}\nDifficulty: {{difficulty}}\n\nContext: {{chunk_content}}"
+                    ),
+                )
+            return Prompt(
+                name=name,
+                version="1",
+                system_prompt=f"System prompt for {name}",
+                user_prompt="Feedback prompt",
+            )
 
         async def health_check(self) -> bool:
             return True
@@ -579,6 +799,65 @@ async def test_execute_exceeds_max_iterations_raises_error() -> None:
                 feedback_issues=["Q1 issue"],
             )
         )
+
+
+@pytest.mark.unit
+async def test_execute_retrigger_limits_to_mcq_only() -> None:
+    publisher = RecordingPublisher()
+
+    class RegenSubmissionClient(FakeSubmissionClient):
+        async def get_assessment_config(self, command: Any) -> AssessmentConfig:
+            return AssessmentConfig(
+                assessment_id=command.assessment_id,
+                workflow_id=command.workflow_id,
+                assessor_id="assessor_123",
+                assessment_title="Regeneration Assessment",
+                purpose="assessment",
+                duration_minutes=60,
+                difficulty_level="medium",
+                structured_question_count=2,
+                non_structured_question_count=2,
+                web_research_mode="disabled",
+                status="draft",
+            )
+
+    submission_client = RegenSubmissionClient()
+    knowledge_client = FakeKnowledgeClient()
+
+    service = GenerateQnAService(
+        llm_provider=FakeLLMProvider(),
+        question_set_repo=InMemoryQuestionSetRepository(),
+        idempotency_store=InMemoryIdempotencyStore(),
+        event_publisher=publisher,
+        submission_client=submission_client,
+        knowledge_client=knowledge_client,  # type: ignore
+        telemetry=FakeTelemetry(),
+    )
+
+    receipt = await service.execute(
+        GenerationCommand(
+            request_id="evt_regen_mcq_only_123",
+            workflow_id="wf_regen_mcq_only",
+            correlation_id="corr_regen_mcq_only",
+            trace_id=None,
+            assessment_id="assessment_regen_mcq_only",
+            question_set_id="qs_existing_123",
+            validation_result="fail",
+            iteration=1,
+            structured_count=None,
+            non_structured_count=None,
+            difficulty_level=None,
+            purpose=None,
+            feedback_issues=["validator rejected open-ended questions"],
+        )
+    )
+
+    assert receipt.structured_generated == 2
+    assert receipt.non_structured_generated == 0
+    assert all(
+        question.question_type == "structured"
+        for question in submission_client.questions_written[0].questions
+    )
 
 
 @pytest.mark.unit
@@ -886,20 +1165,33 @@ async def test_execute_with_prompt_provider_uses_combined_prompt() -> None:
     """Test that prompt provider drives the mixed assessment prompt."""
 
     class RecordingPromptProvider(PromptProvider):
-        """Prompt provider that records system prompt requests."""
+        """Prompt provider that records prompt requests."""
 
         def __init__(self) -> None:
-            self.system_prompts_fetched: list[tuple[str, str | None]] = []
+            self.prompts_fetched: list[str] = []
 
-        @property
-        def default_label(self) -> str:
-            return "production"
-
-        async def get_system_prompt(
-            self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> str:
-            self.system_prompts_fetched.append((name, label))
-            return f"System prompt for {name}"
+        async def get_prompt(self, name: str) -> Prompt:
+            self.prompts_fetched.append(name)
+            if name == PromptProvider.ITEM_WRITER_PROMPT_NAME:
+                user_prompt = (
+                    "Generate {{structured_count}} structured and "
+                    "{{non_structured_count}} open-ended questions at "
+                    "{{difficulty}} difficulty about {{topics}} using {{chunks}}."
+                )
+            elif name == PromptProvider.OPTIONS_ONLY_WRITER_PROMPT_NAME:
+                user_prompt = (
+                    "Complete the following MCQ question by generating the correct "
+                    "answer and three plausible distractors.\n\nQuestion: {{question_text}}\n"
+                    "Topic: {{topic}}\nDifficulty: {{difficulty}}\n\nContext: {{chunk_content}}"
+                )
+            else:
+                user_prompt = "Feedback prompt"
+            return Prompt(
+                name=name,
+                version="1",
+                system_prompt=f"System prompt for {name}",
+                user_prompt=user_prompt,
+            )
 
         async def health_check(self) -> bool:
             return True
@@ -943,11 +1235,8 @@ async def test_execute_with_prompt_provider_uses_combined_prompt() -> None:
 
     assert receipt.question_count == 3
     assert receipt.status == "completed"
-    assert prompt_provider.system_prompts_fetched[0] == (
-        "Assessment Generator",
-        "production",
-    )
-    assert len(prompt_provider.system_prompts_fetched) == 5
+    assert prompt_provider.prompts_fetched[0] == "item-writer"
+    assert len(prompt_provider.prompts_fetched) == 5
 
 
 @pytest.mark.unit
@@ -1166,14 +1455,13 @@ async def test_mcq_option_letter_preservation_non_a_correct() -> None:
     class ConfigurablePromptProvider(PromptProvider):
         """Prompt provider that returns prompts for 3-prompt workflow."""
 
-        @property
-        def default_label(self) -> str:
-            return "production"
-
-        async def get_system_prompt(
-            self, name: str, *, label: str | None = None, version: int | None = None
-        ) -> str:
-            return f"System prompt for {name}"
+        async def get_prompt(self, name: str) -> Prompt:
+            return Prompt(
+                name=name,
+                version="1",
+                system_prompt=f"System prompt for {name}",
+                user_prompt=f"User prompt for {name}",
+            )
 
         async def health_check(self) -> bool:
             return True
@@ -1302,7 +1590,7 @@ async def test_regeneration_uses_assessment_config_from_submission_service() -> 
     assert len(submission_client.config_calls) == 1
     assert submission_client.config_calls[0].assessment_id == "assessment_regen_config"
 
-    # Verify receipt uses config values (5 structured + 2 non_structured)
-    assert receipt.question_count == 7
+    # Retrigger regenerations now stay MCQ-only.
+    assert receipt.question_count == 5
     assert receipt.structured_generated == 5
-    assert receipt.non_structured_generated == 2
+    assert receipt.non_structured_generated == 0

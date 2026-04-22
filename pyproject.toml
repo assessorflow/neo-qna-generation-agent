@@ -49,6 +49,7 @@ qna-serve = "qna_generation_agent.interfaces.serve.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qna_generation_agent"]
+include = ["src/qna_generation_agent/infrastructure/llm/prompt_assets/*.prompt.md"]
 
 [tool.ruff]
 target-version = "py313"

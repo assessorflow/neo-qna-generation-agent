@@ -29,8 +29,8 @@ from qna_generation_agent.infrastructure.grpc.knowledge_client import (
 from qna_generation_agent.infrastructure.grpc.submission_client import (
     GrpcSubmissionClient,
 )
-from qna_generation_agent.infrastructure.llm.langfuse_prompt_provider import (
-    LangfusePromptProvider,
+from qna_generation_agent.infrastructure.llm.local_prompt_provider import (
+    LocalPromptProvider,
 )
 from qna_generation_agent.infrastructure.llm.strands_provider import StrandsLLMProvider
 from qna_generation_agent.infrastructure.messaging.pubsub_publisher import (
@@ -52,12 +52,6 @@ from qna_generation_agent.infrastructure.telemetry.langfuse_client import (
 logger = get_logger(__name__)
 
 
-if TYPE_CHECKING:
-    from qna_generation_agent.application.services.prompt_test_service import (
-        PromptTestService,
-    )
-
-
 @dataclass(slots=True)
 class ApplicationContainer:
     """Factory pattern: process-scoped dependency graph."""
@@ -73,7 +67,6 @@ class ApplicationContainer:
     knowledge_client: KnowledgeClient
     prompt_provider: PromptProvider | None = None
     generate_service: GenerateQnAService | None = None
-    prompt_test_service: PromptTestService | None = None
     cheap_llm_provider: LLMProvider | None = None
     expensive_llm_provider: LLMProvider | None = None
 
@@ -86,7 +79,6 @@ class ApplicationContainer:
             telemetry=bool(self.telemetry),
             subscriber=bool(self.subscriber),
             submission_client=bool(self.submission_client),
-            prompt_provider=bool(self.prompt_provider),
         )
 
     async def shutdown(self) -> None:
@@ -103,10 +95,6 @@ class ApplicationContainer:
                 self.knowledge_client.close if self.knowledge_client else None,
             ),
             ("event_publisher", self.event_publisher.close),
-            (
-                "prompt_provider",
-                self.prompt_provider.shutdown if self.prompt_provider else None,
-            ),
         ]
         for name, close_fn in clients:
             if close_fn:
@@ -197,52 +185,10 @@ def _build_expensive_llm(settings: Settings) -> LLMProvider:
     return _build_llm(settings, settings.expensive_model_id)
 
 
-def _build_prompt_provider(settings: Settings) -> PromptProvider | None:
-    """Build Langfuse prompt provider if credentials are available."""
-    if not settings.langfuse_enabled:
-        return None
-
-    return LangfusePromptProvider(
-        public_key=settings.langfuse_public_key,
-        secret_key=settings.langfuse_secret_key,
-        host=settings.langfuse_base_url,
-        environment=settings.environment.value,
-        release=settings.release,
-        default_label=settings.prompt_label,
-    )
-
-
-def _build_prompt_test_service(
-    settings: Settings,
-    prompt_provider: PromptProvider | None,
-    llm_provider: LLMProvider | None,
-) -> PromptTestService | None:
-    """Build prompt test service if Langfuse is available.
-
-    The PromptTestService requires a prompt provider (Langfuse) and an LLM
-    provider to function. It is only available when ENABLE_TEST_ROUTES is
-    true and both providers are configured.
-    """
-    if not settings.enable_test_routes:
-        return None
-
-    if prompt_provider is None:
-        logger.info("prompt_test_service_disabled", reason="langfuse_not_configured")
-        return None
-
-    if llm_provider is None:
-        logger.info("prompt_test_service_disabled", reason="llm_not_configured")
-        return None
-
-    from qna_generation_agent.application.services.prompt_test_service import (
-        PromptTestService,
-    )
-
-    return PromptTestService(
-        llm_provider=llm_provider,
-        prompt_provider=prompt_provider,
-        timeout_seconds=settings.llm_timeout_seconds,
-    )
+def _build_prompt_provider(settings: Settings) -> PromptProvider:
+    """Build the local prompt provider."""
+    del settings
+    return LocalPromptProvider()
 
 
 def _build_subscriber(
@@ -301,6 +247,7 @@ def _build_container(settings: Settings) -> ApplicationContainer:
         knowledge_client=knowledge_client,
         telemetry=telemetry,
         max_iterations=settings.qa_gen_max_iterations,
+        swarm_size=settings.swarm_size,
         prompt_provider=prompt_provider,
         cheap_llm_provider=cheap_llm_provider,
         expensive_llm_provider=expensive_llm_provider,
@@ -313,8 +260,6 @@ def _build_container(settings: Settings) -> ApplicationContainer:
             generate_service=generate_service,
         )
 
-    prompt_test_service = _build_prompt_test_service(settings, prompt_provider, llm_provider)
-
     return ApplicationContainer(
         settings=settings,
         llm_provider=llm_provider,
@@ -326,7 +271,6 @@ def _build_container(settings: Settings) -> ApplicationContainer:
         submission_client=submission_client,
         knowledge_client=knowledge_client,
         prompt_provider=prompt_provider,
-        prompt_test_service=prompt_test_service,
         generate_service=generate_service,
         cheap_llm_provider=cheap_llm_provider,
         expensive_llm_provider=expensive_llm_provider,
