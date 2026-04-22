@@ -1,4 +1,4 @@
-"""Unit tests for the prompt provider."""
+"""Unit tests for the prompt model."""
 
 from __future__ import annotations
 
@@ -9,234 +9,74 @@ from qna_generation_agent.domain.errors import ValidationError
 
 
 @pytest.mark.unit
-def test_prompt_is_chat_detection() -> None:
-    """Test that chat prompts are correctly identified."""
-    text_prompt = Prompt(
-        name="test-text",
-        version=1,
-        prompt_text="Hello {{name}}!",
-        chat_messages=None,
+def test_prompt_compile_text_sections() -> None:
+    """Test compiling a prompt with variables in both sections."""
+    prompt = Prompt(
+        name="item-writer",
+        version="1",
+        system_prompt="You are {{role}}.",
+        user_prompt="Write {{count}} items for {{topic}}.",
     )
-    assert not text_prompt.is_chat_prompt()
 
-    chat_prompt = Prompt(
-        name="test-chat",
-        version=1,
-        prompt_text=None,
-        chat_messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello!"},
-        ],
-    )
-    assert chat_prompt.is_chat_prompt()
+    compiled = prompt.compile(role="an expert", count=3, topic="grammar")
+
+    assert compiled.system_prompt == "You are an expert."
+    assert compiled.user_prompt == "Write 3 items for grammar."
 
 
 @pytest.mark.unit
-def test_prompt_compile_text() -> None:
-    """Test compiling a text prompt with variables."""
+def test_prompt_compile_rejects_unresolved_variables() -> None:
+    """Compilation fails when placeholders remain in either section."""
     prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Hello {{name}}! Your score is {{score}}.",
-    )
-
-    result = prompt.compile(name="Alice", score=100)
-
-    assert isinstance(result, str)
-    assert result == "Hello Alice! Your score is 100."
-
-
-@pytest.mark.unit
-def test_prompt_compile_chat() -> None:
-    """Test compiling a chat prompt with variables."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        chat_messages=[
-            {"role": "system", "content": "You are {{role}}."},
-            {"role": "user", "content": "Help me with {{task}}."},
-        ],
-    )
-
-    result = prompt.compile(role="an expert", task="Python")
-
-    assert isinstance(result, list)
-    assert result[0]["role"] == "system"
-    assert result[0]["content"] == "You are an expert."
-    assert result[1]["role"] == "user"
-    assert result[1]["content"] == "Help me with Python."
-
-
-@pytest.mark.unit
-def test_prompt_compile_no_variables() -> None:
-    """Test compiling a prompt without variables."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Hello World!",
-    )
-
-    result = prompt.compile()
-
-    assert result == "Hello World!"
-
-
-@pytest.mark.unit
-def test_prompt_empty_chat_messages() -> None:
-    """Test that empty chat_messages list is treated as text prompt."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Hello!",
-        chat_messages=[],
-    )
-
-    # Empty list should not be considered a chat prompt
-    assert not prompt.is_chat_prompt()
-    result = prompt.compile()
-    assert result == "Hello!"
-
-
-@pytest.mark.unit
-def test_prompt_compile_rejects_unresolved_variables_text() -> None:
-    """Text prompt compilation fails on unresolved placeholders."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Hello {{name}}! Missing: {{missing_var}}.",
+        name="item-writer",
+        version="1",
+        system_prompt="You are {{role}}.",
+        user_prompt="Write {{count}} items for {{topic}}.",
     )
 
     with pytest.raises(ValidationError) as exc_info:
-        prompt.compile(name="Alice")
+        prompt.compile(role="an expert", count=3)
+
     assert "Unresolved prompt variables" in str(exc_info.value)
-    assert "missing_var" in str(exc_info.value)
-
-
-@pytest.mark.unit
-def test_prompt_compile_rejects_unresolved_variables_chat() -> None:
-    """Chat prompt compilation fails on unresolved placeholders."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        chat_messages=[
-            {"role": "system", "content": "You are {{role}}."},
-            {"role": "user", "content": "Missing: {{unresolved}}."},
-        ],
-    )
-
-    with pytest.raises(ValidationError) as exc_info:
-        prompt.compile(role="an expert")
-    assert "Unresolved prompt variables" in str(exc_info.value)
-    assert "unresolved" in str(exc_info.value)
-
-
-@pytest.mark.unit
-def test_prompt_compile_rejects_null_text() -> None:
-    """Text prompt compilation fails when prompt_text is None."""
-    prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text=None,
-    )
-
-    with pytest.raises(ValidationError) as exc_info:
-        prompt.compile()
-    assert "prompt_text is None" in str(exc_info.value)
-
-
-@pytest.mark.unit
-def test_prompt_compile_rejects_null_chat_messages() -> None:
-    """Chat prompt compilation fails when chat_messages is None.
-
-    Note: When both prompt_text and chat_messages are None, the prompt
-    is treated as text (is_chat_prompt returns False), so the error
-    comes from _compile_text instead.
-    """
-    prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text=None,
-        chat_messages=None,
-    )
-
-    with pytest.raises(ValidationError) as exc_info:
-        prompt.compile()
-    # When both are None, is_chat_prompt() returns False, so _compile_text runs
-    assert "prompt_text is None" in str(exc_info.value)
+    assert "topic" in str(exc_info.value)
 
 
 @pytest.mark.unit
 def test_prompt_compile_preserves_string_values() -> None:
     """String values are substituted without coercion."""
     prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Value: {{value}}",
+        name="item-writer",
+        version="1",
+        system_prompt="System",
+        user_prompt="Value: {{value}}",
     )
 
-    result = prompt.compile(value="hello world")
-    assert result == "Value: hello world"
+    compiled = prompt.compile(value="hello world")
+    assert compiled.user_prompt == "Value: hello world"
 
 
 @pytest.mark.unit
 def test_prompt_compile_converts_non_string_values() -> None:
     """Non-string values are converted to string."""
     prompt = Prompt(
-        name="test",
-        version=1,
-        prompt_text="Count: {{count}}, Active: {{active}}",
+        name="item-writer",
+        version="1",
+        system_prompt="System",
+        user_prompt="Count: {{count}}, Active: {{active}}",
     )
 
-    result = prompt.compile(count=42, active=True)
-    assert result == "Count: 42, Active: True"
+    compiled = prompt.compile(count=42, active=True)
+    assert compiled.user_prompt == "Count: 42, Active: True"
 
 
 @pytest.mark.unit
 def test_prompt_version_string_property() -> None:
-    """version_string returns formatted name@version."""
+    """version_string returns formatted name@vversion."""
     prompt = Prompt(
-        name="Assessment Generator",
-        version=5,
-        prompt_text="Generate questions",
+        name="item-writer",
+        version="5",
+        system_prompt="System",
+        user_prompt="User",
     )
 
-    assert prompt.version_string == "Assessment Generator@v5"
-
-
-@pytest.mark.unit
-def test_prompt_compiled_to_string_with_text() -> None:
-    """compiled_to_string returns string as-is for text prompts."""
-    compiled = "Hello World!"
-    result = Prompt.compiled_to_string(compiled)
-    assert result == "Hello World!"
-
-
-@pytest.mark.unit
-def test_prompt_compiled_to_string_with_chat_messages() -> None:
-    """compiled_to_string joins chat message contents with newlines."""
-    compiled = [
-        {"role": "system", "content": "You are an expert."},
-        {"role": "user", "content": "Generate questions."},
-    ]
-    result = Prompt.compiled_to_string(compiled)
-    assert result == "You are an expert.\n\nGenerate questions."
-
-
-@pytest.mark.unit
-def test_prompt_compiled_to_string_with_empty_list() -> None:
-    """compiled_to_string handles empty list by returning str()."""
-    compiled: list[dict[str, str]] = []
-    result = Prompt.compiled_to_string(compiled)
-    assert result == "[]"
-
-
-@pytest.mark.unit
-def test_prompt_compiled_to_string_with_invalid_items() -> None:
-    """compiled_to_string skips non-dict items in chat list."""
-    compiled = [
-        {"role": "system", "content": "System message."},
-        "invalid_item",
-        {"role": "user", "content": "User message."},
-    ]
-    result = Prompt.compiled_to_string(compiled)
-    assert result == "System message.\n\nUser message."
+    assert prompt.version_string == "item-writer@v5"

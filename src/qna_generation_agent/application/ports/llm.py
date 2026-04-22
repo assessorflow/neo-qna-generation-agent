@@ -52,10 +52,10 @@ class LLMProvider(ABC):
         correlation_id: str,
         question_type: str,
     ) -> QuestionBatch:
-        """Generate questions using a pre-compiled prompt from Langfuse.
+        """Generate questions using a pre-compiled prompt.
 
         Args:
-            prompt: The compiled prompt text from Langfuse.
+            prompt: The compiled prompt text.
             count: Number of questions to generate.
             difficulty: Target difficulty level.
             correlation_id: Correlation ID for tracing.
@@ -85,12 +85,12 @@ class LLMProvider(ABC):
         """Invoke LLM with separate system and user messages.
 
         This is the primary method for the new architecture. The system
-        message (fetched from Langfuse) defines role and format rules.
+        message (from the prompt asset) defines role and format rules.
         The user message (built from template) contains the specific
         request data.
 
         Args:
-            system_message: Static system prompt from Langfuse.
+            system_message: Static system prompt from the prompt asset.
             user_message: Dynamic user prompt built from template.
             structured_output_model: Pydantic model for response validation.
             model_tier: Which model to use ("expensive" or "cheap").

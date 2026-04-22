@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 When working with this codebase, use these resources for authoritative guidance:
 
 - **Strands MCP** — Use the local Strands MCP server for Strands Agents framework questions, SDK usage, `Agent`/`OpenAIModel` patterns, structured output schemas, or workflow tool documentation
-- **`/langfuse`** — Use for Langfuse prompt management, telemetry, `@observe` decorator usage, tracing patterns, or prompt fetching via the Langfuse SDK
+- **`/langfuse`** — Use for Langfuse telemetry, `@observe` decorator usage, tracing patterns, or SDK questions. Prompt assets are local `.prompt.md` files.
 
 ## Project Overview
 
@@ -19,7 +19,7 @@ This is the **Question and Answer Generation Agent** — one component of the la
 - Domain models and application service structure
 - Full QnA generation logic (LLM integration, gRPC calls)
 - In-memory persistence for question sets and idempotency
-- **Langfuse prompt management** — centralized prompts with version control
+- **Local prompt assets** — versioned `.prompt.md` files in git
 - **Langfuse telemetry** — distributed tracing and observability
 - **Structured output schemas** — type-safe LLM responses
 - **Sequential 3-prompt workflow** — Assessment Generator → MCQ Answer Generator → MCQ Explanation Generator
@@ -36,7 +36,7 @@ This is the **Question and Answer Generation Agent** — one component of the la
 - **orjson>=3.11** — JSON serialization (returns bytes, no decode needed)
 - **structlog>=25.5** — Structured JSON logging with `get_logger(__name__)`
 - **pydantic>=2.13 + pydantic-settings>=2.13** — Environment configuration with `ConfigDict(strict=True)`
-- **Langfuse>=4.2** — Prompt management (`@observe` decorator) and telemetry. Use `/langfuse` skill for SDK questions
+- **Langfuse>=4.2** — Telemetry and tracing. Use `/langfuse` skill for SDK questions
 - **Strands>=1.35** — LLM agent framework (Agent initialized once and reused). Consult Strands MCP for framework questions
 - **google-cloud-pubsub>=2.37** — Async Pub/Sub with `SubscriberClient` and `StreamingPullFuture`
 - **grpcio>=1.80** — Async gRPC with `grpc.aio` channels (shared, created at startup)
@@ -57,7 +57,6 @@ src/qna_generation_agent/
 │   ├── errors.py           # Application errors
 │   ├── services/           # Application services
 │   │   ├── generate_qna.py       # Main generation workflow
-│   │   └── prompt_test_service.py # Prompt testing endpoints
 │   └── ports/              # Repository interfaces
 │       ├── llm.py              # LLM provider port
 │       ├── prompt_provider.py  # Prompt provider port
@@ -76,7 +75,7 @@ src/qna_generation_agent/
 ├── infrastructure/         # External adapters
 │   ├── llm/                # LLM provider + Prompt provider
 │   │   ├── strands_provider.py          # Strands LLM implementation
-│   │   ├── langfuse_prompt_provider.py  # Langfuse prompt fetching
+│   │   ├── langfuse_prompt_provider.py  # Prompt asset fetching
 │   │   └── prompt_builder.py            # Input/output schemas
 │   ├── messaging/          # Pub/Sub publisher/subscriber
 │   ├── persistence/        # In-memory repositories
@@ -86,7 +85,6 @@ src/qna_generation_agent/
     ├── http/               # HTTP server
     │   ├── factory.py      # BlackSheep app factory with lifespan
     │   ├── routes_health.py # Health check endpoints
-    │   ├── routes_prompts.py # Prompt testing endpoints (development)
     │   ├── middleware.py   # Error handling, logging, correlation, CORS
     │   └── schemas.py      # Pydantic request/response models
     └── serve/              # Unified HTTP + Pub/Sub process
@@ -97,7 +95,7 @@ src/qna_generation_agent/
 ### Transport Layers
 The service is designed with three interface types:
 
-1. **HTTP** (`interfaces/http/`) — Health checks (`/healthz`, `/readyz`, `/livez`, `/version`) and prompt testing (`/test/prompt/*`)
+1. **HTTP** (`interfaces/http/`) — Health checks (`/healthz`, `/readyz`, `/livez`, `/version`)
 2. **Pub/Sub** — Async event consumption from Google Cloud Pub/Sub (triggered by Orchestrator)
 3. **gRPC** — Synchronous RPC for Knowledge Service and Assessment Submission Service calls
 
@@ -110,7 +108,7 @@ uv run qna-serve
 ```
 
 This single process handles:
-- **HTTP** — Health checks and prompt testing (when enabled)
+- **HTTP** — Health checks
 - **Pub/Sub** — Async event consumption with graceful shutdown
 - **gRPC** — Synchronous RPC for inter-service communication
 
@@ -152,16 +150,16 @@ container = bootstrap_serve(settings)
 Configuration determines which adapters are created:
 - **In-memory repositories** — Always used for QuestionSet and idempotency
 - **No Pub/Sub config** → Null event publisher
-- **No Langfuse keys** → No-op telemetry and no prompt provider
-- **Langfuse keys present** → LangfuseTelemetry + LangfusePromptProvider
-- **ENABLE_TEST_ROUTES=true + Langfuse** → PromptTestService available
+- **No Langfuse keys** → No-op telemetry
+- **Prompt assets present** → Prompt provider available
+- **Prompt assets present** → Prompt provider available
 
 ### Event Flow
 
 1. Orchestrator publishes trigger event to Pub/Sub
 2. Worker receives event → `HandleGenerationTrigger` command
 3. `GenerateQnAService`:
-   - Fetches prompt from Langfuse (e.g., "Assessment Generator")
+   - Loads versioned prompt assets from disk (e.g., "Assessment Generator")
    - Calls Knowledge Service (gRPC) to get topics and chunks
    - Executes **sequential 3-prompt workflow** for structured questions
    - Persists question set via repository
@@ -208,26 +206,26 @@ When `CHEAP_MODEL_ID` is not configured, all stages use the expensive model for 
 
 ### Prompt Management Architecture
 
-**Use `/langfuse` skill for prompt management SDK questions.**
+**Use `/langfuse` skill for telemetry and SDK questions.**
 
 ```python
 # Three-tier prompt system:
 # 1. Port (interface)       → application/ports/prompt_provider.py
-# 2. Provider (adapter)     → infrastructure/llm/langfuse_prompt_provider.py
+# 2. Provider (adapter)     → infrastructure/llm/local_prompt_provider.py
 # 3. Input/Output schemas   → infrastructure/llm/prompt_builder.py
 
 # Available prompts:
-ASSESSMENT_GENERATOR = "Assessment Generator"
-MCQ_EXPLANATION_GENERATOR = "MCQ Explanation Generator"
-MCQ_ANSWER_GENERATOR = "MCQ Answer Generator"
+ITEM_WRITER = "item-writer"  # alias: Assessment Generator
+OPTIONS_ONLY_WRITER = "options-only-writer"  # alias: MCQ Answer Generator
+FEEDBACK_WRITER = "feedback-writer"  # alias: MCQ Explanation Generator
 
 # Usage:
-prompt = await container.prompt_provider.get_assessment_generator_prompt(label="production")
+prompt = await container.prompt_provider.get_prompt("Assessment Generator")
 compiled = prompt.compile(structured_count=5, non_structured_count=3, ...)
 result = await agent.invoke_async(compiled, structured_output_model=AssessmentGeneratorOutputSchema)
 ```
 
-**Prompt Caching:** Langfuse SDK caches prompts locally for 5 minutes. Updates in Langfuse UI take effect within 5 minutes without service restart.
+**Prompt Versioning:** Local prompt assets are versioned in git. Bump the asset version or file name to roll forward.
 
 ## Configuration
 
@@ -242,10 +240,12 @@ Environment variables (loaded from `.env`):
 - `PUBSUB_TOPIC_TOKEN_USAGE` — Topic for token usage events
 - `PUBSUB_TOPIC_TRIGGER_DLQ` — Dead letter queue topic for failed triggers
 - `PUBSUB_ENABLED` — Enable/disable Pub/Sub (default: `true`)
-- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` — Prompt management AND telemetry
+- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` — Telemetry only
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` — LLM configuration
 - `CHEAP_MODEL_ID` — Cost-optimized model for MCQ answer/explanation (defaults to `OPENAI_MODEL`)
 - `EXPENSIVE_MODEL_ID` — High-quality model for assessment generation (defaults to `OPENAI_MODEL`)
+- `PROMPT_ASSET_DIR` — Directory containing local `.prompt.md` assets (default: `prompts/`)
+- `PROMPT_SWARM_SIZE` — Number of prompt variants to load per swarm run (default: `1`)
 - `OPENAI_TEMPERATURE` — LLM temperature (default: `0.2`)
 - `OPENAI_MAX_OUTPUT_TOKENS` — Max tokens per request (default: `4096`)
 - `SUBMISSION_SERVICE_URL` — gRPC URL for Assessment Submission Service
@@ -254,8 +254,7 @@ Environment variables (loaded from `.env`):
 - `GRPC_TLS_ENABLED` — Enable TLS for gRPC (default: `false`)
 - `GRPC_TLS_CERT_PATH` — Path to custom CA certificate
 - `RELEASE` — Release version for observability
-- `ENABLE_TEST_ROUTES` — Enable `/test/*` prompt testing endpoints (default: `false`)
-- `PROMPT_LABEL` — Default Langfuse prompt label (default: `production`)
+- `PROMPT_LABEL` — Deprecated; prompt versions now come from local asset metadata
 - `QA_GEN_MAX_ITERATIONS` — Max regeneration iterations (default: `3`)
 - `QA_GEN_MAX_RETRIES` — Max retries per generation attempt (default: `3`)
 - `QA_GEN_TIMEOUT_MS` — Generation timeout in milliseconds (default: `30000`)
@@ -359,23 +358,6 @@ uv run pytest --cov=qna_generation_agent --cov-report=html
 | `GET /docs` | Swagger UI documentation (OpenAPI) |
 | `GET /openapi.json` | OpenAPI 3.0 specification |
 
-### Prompt Testing Endpoints (Development)
-
-When `ENABLE_TEST_ROUTES=true` AND Langfuse is configured:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `POST /test/prompt/assessment` | Test Assessment Generator prompt |
-| `POST /test/prompt/mcq-answer` | Test MCQ Answer Generator prompt |
-| `POST /test/prompt/mcq-explanation` | Test MCQ Explanation Generator prompt |
-
-All prompt testing endpoints return `PromptTestResponse` with:
-- `success` — Whether execution succeeded
-- `prompt_version` — Langfuse prompt version used
-- `execution_time_ms` — Duration of execution
-- `result` — Parsed structured output (if successful)
-- `error` — Error message (if failed)
-
 ## Domain Model
 
 ### Entities
@@ -447,7 +429,7 @@ This service operates within a larger event-driven architecture:
 - **Evaluator Agent** — Question validation and participant scoring
 - **Reporting Agent** — Feedback generation
 
-This QnA Generation Agent receives `assessorflow.qa-generation.trigger` events from the Orchestrator via Pub/Sub, **fetches versioned prompts from Langfuse**, retrieves topics and chunks from the Knowledge Service via gRPC, generates questions using LLM with structured output schemas, and writes results back to the Assessment Submission Service.
+This QnA Generation Agent receives `assessorflow.qa-generation.trigger` events from the Orchestrator via Pub/Sub, **loads versioned prompts from local `.prompt.md` assets**, retrieves topics and chunks from the Knowledge Service via gRPC, generates questions using LLM with structured output schemas, and writes results back to the Assessment Submission Service.
 
 ### Regeneration Flow
 
@@ -526,17 +508,17 @@ def test_prompt_compiles_correctly() -> None:
 3. Add contract tests in `tests/contract/`
 
 ### Adding a New Prompt
-1. Create prompt in Langfuse UI with variables
-2. Add prompt name constant in `LangfusePromptProvider`
+1. Create or update a local `.prompt.md` asset with variables
+2. Add prompt name constant in the prompt provider
 3. Add input/output schema in `prompt_builder.py` (if new variable pattern)
-4. Add convenience method in `LangfusePromptProvider` (optional)
+4. Add convenience method in the prompt provider (optional)
 5. Add unit tests in `tests/unit/test_prompt_schemas.py`
 
 ### Using a Prompt in Service
 ```python
 # In GenerateQnAService:
 if self._prompt_provider:
-    prompt = await self._prompt_provider.get_assessment_generator_prompt(label="production")
+    prompt = await self._prompt_provider.get_assessment_generator_prompt(version=3)
     input_data = AssessmentGeneratorInputSchema.from_context(
         context=context,
         structured_count=command.structured_count,
@@ -569,9 +551,9 @@ if self._prompt_provider:
 readyz check: prompt_provider_healthy: false
 ```
 **Solutions:**
-- Verify `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set
-- Check network connectivity to `LANGFUSE_BASE_URL`
-- Ensure prompts exist in Langfuse project
+- Verify `PROMPT_ASSET_DIR` points to the prompt asset directory
+- Check that the expected `.prompt.md` files are present
+- Ensure the requested prompt version exists
 
 ### Graceful Shutdown Issues
 ```
@@ -625,6 +607,6 @@ Process hangs on SIGTERM / keeps restarting
 3. **Fail Fast**: Validate at boundaries, assert invariants in domain
 4. **Observability**: Structured logging, distributed tracing, health checks
 5. **Security by Default**: TLS available, CORS configurable, secrets externalized
-6. **Prompt as Code**: Versioned prompts in Langfuse, structured schemas in code
+6. **Prompt as Code**: Versioned local prompt assets in git, structured schemas in code
 7. **Unified Process**: HTTP + Pub/Sub coexist in single process with proper lifespan
 8. **Single-Worker Architecture**: Enforced single worker for predictable execution

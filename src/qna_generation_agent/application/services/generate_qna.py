@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from qna_generation_agent.app.json import dumps
 from qna_generation_agent.app.logging import bind_context, get_logger
@@ -74,6 +74,23 @@ from qna_generation_agent.domain.value_objects import AnswerId, QuestionId
 logger = get_logger(__name__)
 
 
+@runtime_checkable
+class SwarmCapableLLMProvider(Protocol):
+    """LLM provider extension for swarm-based candidate generation."""
+
+    async def generate_swarm_candidates(
+        self,
+        *,
+        system_message: str,
+        user_message: str,
+        count: int,
+        difficulty_level: str | None,
+        correlation_id: str,
+        swarm_size: int,
+    ) -> list[Any]:
+        """Generate swarm candidates for initial trigger workflows."""
+
+
 DEFAULT_ASSESSMENT_SYSTEM_PROMPT = (
     "You are an expert assessment creator for English language proficiency tests. "
     "Generate a mixed set of structured multiple-choice questions and open-ended "
@@ -94,6 +111,17 @@ class Subtopic:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class RegenerationQuestionSource:
+    """Local replay source for regeneration flows."""
+
+    question_id: str
+    question_type: str
+    question_text: str
+    answer_text: str
+    metadata: dict[str, Any]
+
+
 class GenerateQnAService:
     """Use-case service for question generation per spec workflow."""
 
@@ -108,6 +136,7 @@ class GenerateQnAService:
         knowledge_client: KnowledgeClient,
         telemetry: TelemetryPort | None = None,
         max_iterations: int = 3,
+        swarm_size: int = 3,
         prompt_provider: PromptProvider | None = None,
         cheap_llm_provider: LLMProvider | None = None,
         expensive_llm_provider: LLMProvider | None = None,
@@ -121,6 +150,7 @@ class GenerateQnAService:
         self._knowledge_client = knowledge_client
         self._telemetry = telemetry
         self._max_iterations = max_iterations
+        self._swarm_size = swarm_size
         self._prompt_provider = prompt_provider
         self._cheap_llm_provider = cheap_llm_provider
         self._expensive_llm_provider = expensive_llm_provider or llm_provider
@@ -479,13 +509,27 @@ class GenerateQnAService:
             if self._telemetry is not None
             else nullcontext()
         ):
-            assessment_questions, prompt_version = await self._generate_assessment_questions(
-                context=context,
-                structured_count=request.structured_count or 0,
-                non_structured_count=request.non_structured_count or 0,
-                difficulty_level=request.difficulty_level,
-                correlation_id=request.correlation_id,
-            )
+            if command.question_set_id and command.validation_result == ValidationResult.FAIL:
+                assessment_questions, prompt_version = (
+                    await self._generate_regeneration_assessment_questions(
+                        context=context,
+                        question_set_id=question_set_id,
+                        structured_count=structured_count,
+                        non_structured_count=non_structured_count,
+                        difficulty_level=difficulty_level,
+                        correlation_id=request.correlation_id,
+                    )
+                )
+            else:
+                assessment_questions, prompt_version = (
+                    await self._generate_initial_assessment_questions(
+                        context=context,
+                        structured_count=structured_count,
+                        non_structured_count=non_structured_count,
+                        difficulty_level=difficulty_level,
+                        correlation_id=request.correlation_id,
+                    )
+                )
 
             for idx, question in enumerate(assessment_questions):
                 if question.question_type == "structured":
@@ -780,6 +824,13 @@ class GenerateQnAService:
             non_structured_count = command.non_structured_count or 0
             difficulty_level = command.difficulty_level
 
+        if is_regeneration and non_structured_count > 0:
+            logger.info(
+                "regeneration_open_ended_questions_disabled",
+                requested_non_structured_count=non_structured_count,
+            )
+            non_structured_count = 0
+
         total_count = structured_count + non_structured_count
 
         return {
@@ -855,9 +906,12 @@ class GenerateQnAService:
         references = [str(chunk_id) for chunk_id in source_chunk_ids] if isinstance(
             source_chunk_ids, list
         ) else []
+        source_question_id = getattr(question, "question_id", None)
 
         return DomainQuestion(
-            id=QuestionId.generate(),
+            id=QuestionId(source_question_id)
+            if source_question_id
+            else QuestionId.generate(),
             text=question_text,
             question_type=QuestionType.NON_STRUCTURED,
             difficulty_level=difficulty_level,
@@ -870,6 +924,194 @@ class GenerateQnAService:
                 references=references,
             ),
         )
+
+    def _score_question_batch(
+        self,
+        batch: Any,
+        *,
+        expected_count: int,
+        structured_count: int,
+        non_structured_count: int,
+    ) -> int:
+        """Score a candidate batch for hybrid swarm selection."""
+        score = 0
+        questions = getattr(batch, "questions", []) or []
+        actual_count = len(questions)
+        score -= abs(expected_count - actual_count) * 20
+        score += min(actual_count, expected_count) * 10
+
+        structured_seen = 0
+        non_structured_seen = 0
+        for question in questions:
+            question_type = getattr(question, "question_type", None)
+            if question_type == "structured":
+                structured_seen += 1
+            elif question_type == "non_structured":
+                non_structured_seen += 1
+
+            if getattr(question, "question_text", ""):
+                score += 4
+            if getattr(question, "answer_text", ""):
+                score += 3
+            if getattr(question, "explanation", None):
+                score += 2
+            if getattr(question, "references", None):
+                score += 2
+            if getattr(question, "topic_id", None):
+                score += 1
+
+        score -= abs(structured_count - structured_seen) * 8
+        score -= abs(non_structured_count - non_structured_seen) * 4
+        if structured_seen == structured_count and non_structured_seen == non_structured_count:
+            score += 15
+        return score
+
+    async def _generate_initial_assessment_questions(
+        self,
+        *,
+        context: AssessmentContext,
+        structured_count: int,
+        non_structured_count: int,
+        difficulty_level: DifficultyLevel | None,
+        correlation_id: str,
+    ) -> tuple[list[Any], str]:
+        """Generate initial questions with swarm-based candidate selection."""
+        if self._swarm_size > 1 and isinstance(
+            self._llm_provider, SwarmCapableLLMProvider
+        ):
+            from qna_generation_agent.infrastructure.llm.prompt_builder import (
+                format_chunks_for_prompt,
+            )
+            from qna_generation_agent.infrastructure.llm.user_prompt_builder import (
+                UserPromptBuilder,
+            )
+
+            prompt_version = "item-writer@legacy"
+            if self._prompt_provider is not None:
+                prompt = await self._prompt_provider.get_item_writer_prompt()
+                compiled_prompt = prompt.compile(
+                    structured_count=structured_count,
+                    non_structured_count=non_structured_count,
+                    difficulty=difficulty_level or "medium",
+                    topics=", ".join(context.topic_ids),
+                    chunks=format_chunks_for_prompt(context.chunks),
+                )
+                system_msg = compiled_prompt.system_prompt
+                user_msg = compiled_prompt.user_prompt
+                prompt_version = compiled_prompt.version_string
+            else:
+                system_msg = DEFAULT_ASSESSMENT_SYSTEM_PROMPT
+                user_prompt_builder = UserPromptBuilder()
+                user_msg = user_prompt_builder.build_assessment_generator_prompt(
+                    structured_count=structured_count,
+                    non_structured_count=non_structured_count,
+                    difficulty=difficulty_level or "medium",
+                    topics=", ".join(context.topic_ids),
+                    chunks=format_chunks_for_prompt(context.chunks),
+                )
+
+            candidates = await self._llm_provider.generate_swarm_candidates(
+                system_message=system_msg,
+                user_message=user_msg,
+                count=structured_count + non_structured_count,
+                difficulty_level=difficulty_level,
+                correlation_id=correlation_id,
+                swarm_size=self._swarm_size,
+            )
+
+            if candidates:
+                scored_candidates = [
+                    (
+                        index,
+                        self._score_question_batch(
+                            batch,
+                            expected_count=structured_count + non_structured_count,
+                            structured_count=structured_count,
+                            non_structured_count=non_structured_count,
+                        ),
+                        batch,
+                    )
+                    for index, batch in enumerate(candidates)
+                ]
+                best_index, best_score, best_batch = max(
+                    scored_candidates, key=lambda item: item[1]
+                )
+                prompt_version = f"{prompt_version}+hybrid-swarm#{best_index + 1}"
+                logger.info(
+                    "swarm_candidate_selected",
+                    candidate_count=len(candidates),
+                    selected_index=best_index,
+                    best_score=best_score,
+                    prompt_version=prompt_version,
+                )
+                return best_batch.questions, prompt_version
+
+            logger.warning(
+                "swarm_candidate_generation_returned_no_batches",
+                swarm_size=self._swarm_size,
+            )
+
+        return await self._generate_assessment_questions(
+            context=context,
+            structured_count=structured_count,
+            non_structured_count=non_structured_count,
+            difficulty_level=difficulty_level,
+            correlation_id=correlation_id,
+        )
+
+    async def _generate_regeneration_assessment_questions(
+        self,
+        *,
+        context: AssessmentContext,
+        question_set_id: str,
+        structured_count: int,
+        non_structured_count: int,
+        difficulty_level: DifficultyLevel | None,
+        correlation_id: str,
+    ) -> tuple[list[Any], str]:
+        """Replay stored questions for retrigger regeneration."""
+        stored_question_set = await self._question_set_repo.get_by_id(question_set_id)
+        if stored_question_set is None:
+            logger.warning(
+                "regeneration_question_set_not_found",
+                question_set_id=question_set_id,
+            )
+            return await self._generate_assessment_questions(
+                context=context,
+                structured_count=structured_count,
+                non_structured_count=non_structured_count,
+                difficulty_level=difficulty_level,
+                correlation_id=correlation_id,
+            )
+
+        if self._prompt_provider is not None:
+            options_prompt = await self._prompt_provider.get_options_only_writer_prompt()
+            feedback_prompt = await self._prompt_provider.get_feedback_writer_prompt()
+            prompt_version = (
+                f"{options_prompt.version_string}+{feedback_prompt.version_string}"
+            )
+        else:
+            prompt_version = "retrigger-local-state@v1"
+
+        replay_questions: list[RegenerationQuestionSource] = []
+        for question in stored_question_set.questions:
+            replay_questions.append(
+                RegenerationQuestionSource(
+                    question_id=question.id.value,
+                    question_type=question.question_type.value,
+                    question_text=question.text,
+                    answer_text=question.answer.text,
+                    metadata=dict(question.metadata),
+                )
+            )
+
+        logger.info(
+            "regeneration_question_set_replayed",
+            question_set_id=question_set_id,
+            question_count=len(replay_questions),
+            prompt_version=prompt_version,
+        )
+        return replay_questions, prompt_version
 
     async def _generate_assessment_questions(
         self,
@@ -894,28 +1136,31 @@ class GenerateQnAService:
             return [], "qa-gen/unknown@v0"
 
         prompt_version = (
-            f"Assessment Generator@{self._prompt_provider.default_label}"
-            if self._prompt_provider is not None
-            else "Assessment Generator@legacy"
+            "item-writer@legacy" if self._prompt_provider is None else "unknown"
         )
 
-        system_msg = (
-            await self._prompt_provider.get_system_prompt(
-                "Assessment Generator",
-                label=self._prompt_provider.default_label,
+        if self._prompt_provider is not None:
+            prompt = await self._prompt_provider.get_item_writer_prompt()
+            compiled_prompt = prompt.compile(
+                structured_count=structured_count,
+                non_structured_count=non_structured_count,
+                difficulty=difficulty_level or "medium",
+                topics=", ".join(context.topic_ids),
+                chunks=format_chunks_for_prompt(context.chunks),
             )
-            if self._prompt_provider is not None
-            else DEFAULT_ASSESSMENT_SYSTEM_PROMPT
-        )
-
-        user_prompt_builder = UserPromptBuilder()
-        user_msg = user_prompt_builder.build_assessment_generator_prompt(
-            structured_count=structured_count,
-            non_structured_count=non_structured_count,
-            difficulty=difficulty_level or "medium",
-            topics=", ".join(context.topic_ids),
-            chunks=format_chunks_for_prompt(context.chunks),
-        )
+            system_msg = compiled_prompt.system_prompt
+            user_msg = compiled_prompt.user_prompt
+            prompt_version = compiled_prompt.version_string
+        else:
+            system_msg = DEFAULT_ASSESSMENT_SYSTEM_PROMPT
+            user_prompt_builder = UserPromptBuilder()
+            user_msg = user_prompt_builder.build_assessment_generator_prompt(
+                structured_count=structured_count,
+                non_structured_count=non_structured_count,
+                difficulty=difficulty_level or "medium",
+                topics=", ".join(context.topic_ids),
+                chunks=format_chunks_for_prompt(context.chunks),
+            )
 
         logger.info(
             "llm_generate_assessment_started",
@@ -1009,22 +1254,26 @@ class GenerateQnAService:
             model_tier="cheap",
         )
 
-        answer_system_msg = (
-            await self._prompt_provider.get_system_prompt(
-                "MCQ Answer Generator",
-                label=self._prompt_provider.default_label,
-            )
-            if self._prompt_provider is not None
-            else build_system_prompt(QuestionType.STRUCTURED)
-        )
         metadata_source = question.metadata or {}
 
-        answer_user_msg = user_prompt_builder.build_mcq_answer_generator_prompt(
-            question_text=question_stem,
-            topic=str(metadata_source.get("topic", "general grammar")),
-            difficulty=difficulty_level or "medium",
-            chunk_content="Mixed",
-        )
+        if self._prompt_provider is not None:
+            answer_prompt = await self._prompt_provider.get_options_only_writer_prompt()
+            compiled_answer_prompt = answer_prompt.compile(
+                question_text=question_stem,
+                topic=str(metadata_source.get("topic", "general grammar")),
+                difficulty=difficulty_level or "medium",
+                chunk_content="Mixed",
+            )
+            answer_system_msg = compiled_answer_prompt.system_prompt
+            answer_user_msg = compiled_answer_prompt.user_prompt
+        else:
+            answer_system_msg = build_system_prompt(QuestionType.STRUCTURED)
+            answer_user_msg = user_prompt_builder.build_mcq_answer_generator_prompt(
+                question_text=question_stem,
+                topic=str(metadata_source.get("topic", "general grammar")),
+                difficulty=difficulty_level or "medium",
+                chunk_content="Mixed",
+            )
 
         cheap_provider = self._get_provider_for_stage(
             GenerationStage.MCQ_ANSWER_GENERATOR
@@ -1069,31 +1318,38 @@ class GenerateQnAService:
             model_tier="cheap",
         )
 
-        explanation_system_msg = (
-            await self._prompt_provider.get_system_prompt(
-                "MCQ Explanation Generator",
-                label=self._prompt_provider.default_label,
-            )
-            if self._prompt_provider is not None
-            else build_system_prompt(QuestionType.STRUCTURED)
-        )
-
         options_dict: dict[str, str] = {}
         correct_letter = answer_result.correct_answer.option_letter
         options_dict[correct_letter] = answer_result.correct_answer.option_text
         for distractor in answer_result.distractors:
             options_dict[distractor.option_letter] = distractor.option_text
 
-        explanation_user_msg = user_prompt_builder.build_mcq_explanation_generator_prompt(
-            question_text=answer_result.question_stem,
-            topic="mixed L1 students",
-            correct_answer=answer_result.correct_answer.option_letter,
-            option_a=options_dict.get("A", ""),
-            option_b=options_dict.get("B", ""),
-            option_c=options_dict.get("C", ""),
-            option_d=options_dict.get("D", ""),
-            chunk_content="mixed L1 students",
-        )
+        if self._prompt_provider is not None:
+            explanation_prompt = await self._prompt_provider.get_feedback_writer_prompt()
+            compiled_explanation_prompt = explanation_prompt.compile(
+                question_text=answer_result.question_stem,
+                topic="mixed L1 students",
+                correct_answer=answer_result.correct_answer.option_letter,
+                option_a=options_dict.get("A", ""),
+                option_b=options_dict.get("B", ""),
+                option_c=options_dict.get("C", ""),
+                option_d=options_dict.get("D", ""),
+                chunk_content="mixed L1 students",
+            )
+            explanation_system_msg = compiled_explanation_prompt.system_prompt
+            explanation_user_msg = compiled_explanation_prompt.user_prompt
+        else:
+            explanation_system_msg = build_system_prompt(QuestionType.STRUCTURED)
+            explanation_user_msg = user_prompt_builder.build_mcq_explanation_generator_prompt(
+                question_text=answer_result.question_stem,
+                topic="mixed L1 students",
+                correct_answer=answer_result.correct_answer.option_letter,
+                option_a=options_dict.get("A", ""),
+                option_b=options_dict.get("B", ""),
+                option_c=options_dict.get("C", ""),
+                option_d=options_dict.get("D", ""),
+                chunk_content="mixed L1 students",
+            )
 
         explanation_provider = self._get_provider_for_stage(
             GenerationStage.MCQ_EXPLANATION_GENERATOR
@@ -1177,8 +1433,12 @@ class GenerateQnAService:
             if key not in metadata_dict and isinstance(value, (str, int, float, bool)):
                 metadata_dict[key] = str(value)
 
+        source_question_id = getattr(question, "question_id", None)
+
         return DomainQuestion(
-            id=QuestionId.generate(),
+            id=QuestionId(source_question_id)
+            if source_question_id
+            else QuestionId.generate(),
             text=answer_result.question_stem,
             question_type=QuestionType.STRUCTURED,
             difficulty_level=difficulty_level,

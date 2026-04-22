@@ -69,7 +69,7 @@ class TestBuildTelemetry:
 
     @pytest.mark.unit
     def test_returns_none_if_disabled(self) -> None:
-        """Test that None is returned if Langfuse is disabled."""
+        """Test that None is returned if prompt telemetry is disabled."""
         settings = MagicMock()
         settings.langfuse_enabled = False
 
@@ -109,7 +109,6 @@ class TestBuildLlm:
         settings.model_id = "gpt-4o"
         settings.llm_api_key = "test-key"
         settings.llm_base_url = "https://api.openai.com"
-        settings.llm_workflow_mode = False
 
         with patch(
             "qna_generation_agent.app.bootstrap.StrandsLLMProvider"
@@ -122,39 +121,46 @@ class TestBuildLlm:
             assert result is mock_instance
 
 
+class TestBuildContainerWiring:
+    """Tests for container wiring details."""
+
+    @pytest.mark.unit
+    def test_passes_swarm_size_to_generation_service(self, monkeypatch) -> None:
+        """_build_container wires QNA_SWARM_SIZE into the service."""
+        from qna_generation_agent.app.bootstrap import _build_container
+        from qna_generation_agent.app.settings import Settings
+
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com")
+        monkeypatch.setenv("SUBMISSION_SERVICE_URL", "grpc://localhost:50051")
+        monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "grpc://localhost:50052")
+        monkeypatch.setenv("QNA_SWARM_SIZE", "6")
+
+        settings = Settings()  # type: ignore[call-arg]
+
+        with patch("qna_generation_agent.app.bootstrap.GenerateQnAService") as mock_service:
+            mock_service.return_value = MagicMock()
+            _build_container(settings)
+
+            assert mock_service.call_args.kwargs["swarm_size"] == 6
+
+
 class TestBuildPromptProvider:
     """Tests for _build_prompt_provider."""
 
     @pytest.mark.unit
-    def test_returns_none_if_disabled(self) -> None:
-        """Test that None is returned if Langfuse is disabled."""
+    def test_creates_local_prompt_provider(self) -> None:
+        """Test that the local prompt provider is created."""
         settings = MagicMock()
-        settings.langfuse_enabled = False
 
         result = _build_prompt_provider(settings)
 
-        assert result is None
+        from qna_generation_agent.infrastructure.llm.local_prompt_provider import (
+            LocalPromptProvider,
+        )
 
-    @pytest.mark.unit
-    def test_creates_provider(self) -> None:
-        """Test that provider is created."""
-        settings = MagicMock()
-        settings.langfuse_enabled = True
-        settings.langfuse_public_key = "test_public"
-        settings.langfuse_secret_key = "test_secret"
-        settings.langfuse_base_url = "https://test.langfuse.com"
-        settings.environment = RuntimeEnvironment.LOCAL
-        settings.release = "v1.0.0"
-
-        with patch(
-            "qna_generation_agent.app.bootstrap.LangfusePromptProvider"
-        ) as mock_provider:
-            mock_instance = MagicMock()
-            mock_provider.return_value = mock_instance
-
-            result = _build_prompt_provider(settings)
-
-            assert result is mock_instance
+        assert isinstance(result, LocalPromptProvider)
 
 
 class TestBuildSubscriber:
@@ -245,9 +251,6 @@ class TestApplicationContainer:
         knowledge_client.close = AsyncMock()
         event_publisher = MagicMock()
         event_publisher.close = AsyncMock()
-        prompt_provider = MagicMock()
-        prompt_provider.shutdown = AsyncMock()
-
         container = ApplicationContainer(
             settings=settings,
             llm_provider=None,
@@ -258,7 +261,6 @@ class TestApplicationContainer:
             subscriber=subscriber,
             submission_client=submission_client,
             knowledge_client=knowledge_client,
-            prompt_provider=prompt_provider,
         )
 
         await container.shutdown()
@@ -268,7 +270,6 @@ class TestApplicationContainer:
         submission_client.close.assert_awaited_once()
         knowledge_client.close.assert_awaited_once()
         event_publisher.close.assert_awaited_once()
-        prompt_provider.shutdown.assert_awaited_once()
 
     @pytest.mark.unit
     async def test_shutdown_handles_errors_gracefully(self) -> None:

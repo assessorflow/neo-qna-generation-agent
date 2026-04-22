@@ -26,6 +26,7 @@ from openai import (
 from pydantic import BaseModel, ValidationError
 from strands import Agent
 from strands.models.openai import OpenAIModel
+from strands.multiagent import Swarm
 
 from qna_generation_agent.app.logging import get_logger
 from qna_generation_agent.application.dto import (
@@ -37,6 +38,7 @@ from qna_generation_agent.application.errors import LLMPermanentError, LLMTransi
 from qna_generation_agent.application.ports.llm import LLMProvider
 from qna_generation_agent.domain.enums import DifficultyLevel, QuestionType
 from qna_generation_agent.infrastructure.llm.prompt_builder import (
+    AssessmentGeneratorOutputSchema,
     GeneratedQuestionBatchSchema,
     build_system_prompt,
     build_user_prompt,
@@ -227,7 +229,7 @@ class StrandsLLMProvider(LLMProvider):
         """Invoke LLM with separate system and user messages.
 
         Args:
-            system_message: Static system prompt from Langfuse.
+            system_message: Static system prompt from the local prompt assets.
             user_message: Dynamic user prompt built from template.
             structured_output_model: Pydantic model for response validation.
             model_tier: Which model to use ("expensive" or "cheap").
@@ -638,7 +640,7 @@ class StrandsLLMProvider(LLMProvider):
         correlation_id: str,
         question_type: str,
     ) -> QuestionBatch:
-        """Generate questions using a pre-compiled prompt from Langfuse."""
+        """Generate questions using a pre-compiled prompt."""
         del correlation_id  # Used for tracing via telemetry
 
         if question_type == "structured":
@@ -655,3 +657,153 @@ class StrandsLLMProvider(LLMProvider):
             question_type=qt,
             prompt_version="langfuse_managed",
         )
+
+    async def generate_swarm_candidates(
+        self,
+        *,
+        system_message: str,
+        user_message: str,
+        count: int,
+        difficulty_level: str | None,
+        correlation_id: str,
+        swarm_size: int,
+    ) -> list[Any]:
+        """Generate candidate batches with a hybrid swarm."""
+        del correlation_id
+
+        if swarm_size < 1:
+            return []
+
+        candidate_focuses = [
+            "maximize topical coverage and direct grounding",
+            "prioritize precise language and clear answerability",
+            "prioritize balanced difficulty and strong distractors",
+            "prioritize concise stems and minimal ambiguity",
+        ]
+
+        candidate_batches: list[Any] = []
+        for index in range(swarm_size):
+            focus = candidate_focuses[index % len(candidate_focuses)]
+            batch = await self._generate_swarm_candidate(
+                candidate_index=index,
+                system_message=system_message,
+                user_message=user_message,
+                count=count,
+                difficulty_level=difficulty_level,
+                focus=focus,
+            )
+            if batch is not None:
+                candidate_batches.append(batch)
+
+        return candidate_batches
+
+    async def _generate_swarm_candidate(
+        self,
+        *,
+        candidate_index: int,
+        system_message: str,
+        user_message: str,
+        count: int,
+        difficulty_level: str | None,
+        focus: str,
+    ) -> AssessmentGeneratorOutputSchema | None:
+        """Generate one candidate batch using a small swarm."""
+
+        generator_prompt = (
+            f"{system_message}\n\n"
+            f"Quality focus: {focus}. Generate one candidate batch."
+        )
+        reviewer_prompt = (
+            f"{system_message}\n\n"
+            f"Quality focus: {focus}. Review and refine the candidate batch."
+        )
+
+        generator_agent = Agent(
+            name=f"assessment_generator_{candidate_index}",
+            model=self._expensive_model,
+            system_prompt=generator_prompt,
+            structured_output_model=AssessmentGeneratorOutputSchema,
+            callback_handler=None,
+        )
+        reviewer_agent = Agent(
+            name=f"assessment_reviewer_{candidate_index}",
+            model=self._expensive_model,
+            system_prompt=reviewer_prompt,
+            structured_output_model=AssessmentGeneratorOutputSchema,
+            callback_handler=None,
+        )
+
+        swarm = Swarm(
+            [generator_agent, reviewer_agent],
+            entry_point=generator_agent,
+            max_handoffs=1,
+            max_iterations=2,
+            execution_timeout=float(self._timeout_seconds),
+            node_timeout=float(self._timeout_seconds),
+            id=f"assessment_candidate_swarm_{candidate_index}",
+        )
+
+        logger.debug(
+            "swarm_candidate_generation_started",
+            candidate_index=candidate_index,
+            focus=focus,
+            model_id=self._expensive_model_id,
+        )
+
+        try:
+            swarm_result = await swarm.invoke_async(
+                user_message,
+                invocation_state={
+                    "candidate_index": candidate_index,
+                    "quality_focus": focus,
+                },
+            )
+        except Exception as error:
+            logger.warning(
+                "swarm_candidate_generation_failed",
+                candidate_index=candidate_index,
+                focus=focus,
+                error=str(error),
+            )
+            return None
+
+        batch = self._extract_swarm_candidate_batch(
+            swarm_result=swarm_result,
+            candidate_index=candidate_index,
+        )
+        if batch is None:
+            logger.warning(
+                "swarm_candidate_missing_structured_output",
+                candidate_index=candidate_index,
+                focus=focus,
+            )
+            return None
+
+        logger.debug(
+            "swarm_candidate_generation_complete",
+            candidate_index=candidate_index,
+            focus=focus,
+            question_count=len(batch.questions),
+        )
+        return batch
+
+    def _extract_swarm_candidate_batch(
+        self,
+        *,
+        swarm_result: Any,
+        candidate_index: int,
+    ) -> AssessmentGeneratorOutputSchema | None:
+        """Extract the best structured output from a swarm run."""
+        node_results = getattr(swarm_result, "results", {}) or {}
+        for _, node_result in reversed(list(node_results.items())):
+            candidate_result = getattr(node_result, "result", None)
+            structured_output = getattr(candidate_result, "structured_output", None)
+            if structured_output is None:
+                continue
+
+            if not isinstance(structured_output, AssessmentGeneratorOutputSchema):
+                continue
+
+            return structured_output
+
+        return None

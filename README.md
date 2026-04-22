@@ -2,7 +2,7 @@
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 
-A production-grade microservice for generating grounded questions and model answers as part of the AssessorFlow platform. This service integrates with Google Cloud Pub/Sub for event-driven workflows, gRPC for inter-service communication, and Langfuse for prompt management and telemetry. Persistence is handled via in-memory repositories (extensible to external stores).
+A production-grade microservice for generating grounded questions and model answers as part of the AssessorFlow platform. This service integrates with Google Cloud Pub/Sub for event-driven workflows, gRPC for inter-service communication, local versioned `.prompt.md` assets for prompt management, and Langfuse for telemetry. Persistence is handled via in-memory repositories (extensible to external stores).
 
 ## Architecture
 
@@ -14,7 +14,7 @@ flowchart TB
         Orchestrator[Orchestrator Agent]
         Knowledge[Knowledge Service]
         Submission[Submission Service]
-        Langfuse[Langfuse Prompt Management]
+        Prompts[Local .prompt.md Assets]
     end
 
     subgraph "QnA Generation Agent"
@@ -31,7 +31,7 @@ flowchart TB
 
         subgraph "Infrastructure Layer"
             LLM[LLM Provider Strands/OpenAI]
-            PromptProvider[Prompt Provider Langfuse]
+            PromptProvider[Prompt Asset Provider]
             Telemetry[Langfuse Telemetry]
         end
     end
@@ -39,7 +39,7 @@ flowchart TB
     Orchestrator -->|Trigger Event| PubSub
     PubSub -->|Process| Commands
     Commands -->|Generate| Services
-    Services -->|Fetch Prompt| Langfuse
+    Services -->|Load Prompt| Prompts
     Services -->|Fetch Context| Knowledge
     Services -->|Publish Results| Submission
     Services -->|Trace| Telemetry
@@ -55,7 +55,7 @@ sequenceDiagram
     participant O as Orchestrator
     participant PS as Pub/Sub
     participant QNA as QnA Agent
-    participant LF as Langfuse
+    participant PF as Prompt Assets
     participant KS as Knowledge Service
     participant SS as Submission Service
 
@@ -82,7 +82,7 @@ sequenceDiagram
 | Message Bus | Google Cloud Pub/Sub | Event-driven communication |
 | Persistence | In-Memory | Question sets, idempotency (extensible) |
 | LLM Integration | Strands Agents | Structured output generation |
-| Prompt Management | Langfuse | Versioned prompt storage and retrieval |
+| Prompt Management | Local `.prompt.md` assets | Versioned prompt storage and retrieval |
 | Telemetry | Langfuse | Distributed tracing and observability |
 | gRPC | grpcio | Inter-service RPC |
 | Serialization | orjson | Fast JSON handling |
@@ -109,7 +109,7 @@ src/qna_generation_agent/
 │   ├── errors.py           # Domain errors
 │   └── value_objects.py    # Type-safe IDs
 ├── infrastructure/         # External adapters
-│   ├── llm/                # Strands provider, Langfuse prompt provider
+│   ├── llm/                # Strands provider, prompt asset provider
 │   ├── messaging/          # Pub/Sub publisher/subscriber
 │   ├── persistence/        # In-memory repositories
 │   ├── grpc/               # gRPC clients
@@ -125,7 +125,7 @@ src/qna_generation_agent/
 
 - Python 3.13 or higher
 - Google Cloud project with Pub/Sub enabled (for production)
-- Langfuse account (optional, for prompt management and telemetry)
+- Langfuse account (optional, for telemetry only)
 
 ### Setup
 
@@ -152,6 +152,8 @@ pip install -e ".[dev,test,lint]"
 | `OPENAI_MODEL` | Yes | - | Model ID (e.g., `gpt-4o`) |
 | `CHEAP_MODEL_ID` | No | `OPENAI_MODEL` | Cost-optimized model for MCQ answer/explanation |
 | `EXPENSIVE_MODEL_ID` | No | `OPENAI_MODEL` | High-quality model for assessment generation |
+| `PROMPT_ASSET_DIR` | No | `prompts/` | Directory containing local `.prompt.md` assets |
+| `PROMPT_SWARM_SIZE` | No | `1` | Number of prompt variants loaded per swarm run |
 | `OPENAI_BASE_URL` | Yes | - | OpenAI API base URL |
 | `OPENAI_TEMPERATURE` | No | `0.2` | LLM temperature |
 | `OPENAI_MAX_OUTPUT_TOKENS` | No | `4096` | Max tokens per request |
@@ -169,11 +171,9 @@ pip install -e ".[dev,test,lint]"
 | `PUBSUB_TOPIC_DECISION_AUDIT` | No | - | Topic for decision audit events |
 | `PUBSUB_TOPIC_TOKEN_USAGE` | No | - | Topic for token usage events |
 | `PUBSUB_TOPIC_TRIGGER_DLQ` | No | - | Dead letter queue topic |
-| `LANGFUSE_PUBLIC_KEY` | No | - | Langfuse public key |
-| `LANGFUSE_SECRET_KEY` | No | - | Langfuse secret key |
+| `LANGFUSE_PUBLIC_KEY` | No | - | Langfuse public key for telemetry |
+| `LANGFUSE_SECRET_KEY` | No | - | Langfuse secret key for telemetry |
 | `LANGFUSE_BASE_URL` | No | `https://cloud.langfuse.com` | Langfuse host |
-| `PROMPT_LABEL` | No | `production` | Default prompt label |
-| `ENABLE_TEST_ROUTES` | No | `false` | Enable `/test/*` debug endpoints |
 | `QA_GEN_MAX_ITERATIONS` | No | `3` | Max regeneration iterations |
 | `QA_GEN_MAX_RETRIES` | No | `3` | Max retries per generation attempt |
 | `QA_GEN_TIMEOUT_MS` | No | `30000` | Generation timeout (ms) |
@@ -215,10 +215,14 @@ PUBSUB_PROJECT_ID=my-gcp-project
 PUBSUB_SUBSCRIPTION_TRIGGER=qna-trigger-sub
 PUBSUB_TOPIC_COMPLETE=qna-complete-topic
 
-# Optional: Langfuse for prompts and telemetry
+# Optional: Langfuse telemetry
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+# Local prompt assets
+PROMPT_ASSET_DIR=prompts
+PROMPT_SWARM_SIZE=1
 
 # Security settings
 CORS_ALLOWED_ORIGINS=https://app.example.com
@@ -273,52 +277,9 @@ Response example:
 }
 ```
 
-### Prompt Testing Endpoints (Development)
-
-When `ENABLE_TEST_ROUTES=true` AND Langfuse is configured, three endpoints are available for testing individual Langfuse prompts via direct Strands Agent execution:
-
-| Endpoint | Method | Description | Default Values |
-|----------|--------|-------------|----------------|
-| `/test/prompt/assessment` | `POST` | Test Assessment Generator | `structured_count=2`, `non_structured_count=1`, `difficulty=medium`, `topics="Grammar, Vocabulary, Article Usage"` |
-| `/test/prompt/mcq-answer` | `POST` | Test MCQ Answer Generator | `question_stem="The student ____ to school yesterday..."`, `grammar_target="past continuous tense"`, `l1_background="Chinese"` |
-| `/test/prompt/mcq-explanation` | `POST` | Test MCQ Explanation Generator | `question="Choose the correct article..."`, `options={A,B,C,D}`, `correct_answer="A"` |
-
-These endpoints return:
-- `success`: Whether execution succeeded
-- `prompt_version`: Which Langfuse prompt version was used
-- `execution_time_ms`: Duration of the workflow execution
-- `result`: Parsed structured output from the LLM
-- `error`: Error message (if failed)
-
-**Example:**
-
-```bash
-# Test Assessment Generator with defaults
-curl -X POST http://localhost:8000/test/prompt/assessment \
-  -H "Content-Type: application/json" \
-  -d '{}'
-
-# Test with custom values
-curl -X POST http://localhost:8000/test/prompt/assessment \
-  -H "Content-Type: application/json" \
-  -d '{
-    "structured_count": 5,
-    "non_structured_count": 2,
-    "difficulty": "hard",
-    "topics": "Academic Writing",
-    "chunks": ["Your custom document chunk here..."]
-  }'
-```
-
-**Requirements:**
-- `ENABLE_TEST_ROUTES=true` must be set
-- Langfuse must be configured (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`)
-- Returns 503 if test routes are disabled or Langfuse is not available
-- Returns 500 if prompt execution fails
-
 ## Prompt Management
 
-The service integrates with Langfuse for centralized prompt management. Prompts are fetched on-demand (with 5-minute SDK caching) ensuring updates take effect without service restart.
+The service uses versioned local `.prompt.md` assets for prompt management. Prompts are loaded from disk, so prompt changes are tracked in git and ship with the service. Swarm size is controlled with `PROMPT_SWARM_SIZE` when evaluating multiple prompt variants.
 
 ### Available Prompts
 
@@ -371,17 +332,17 @@ flowchart TB
 ### Using Prompts in Code
 
 ```python
-from qna_generation_agent.infrastructure.llm.langfuse_prompt_provider import (
-    LangfusePromptProvider,
+from qna_generation_agent.infrastructure.llm.local_prompt_provider import (
+    LocalPromptProvider,
 )
 from qna_generation_agent.infrastructure.llm.prompt_builder import (
     AssessmentGeneratorInputSchema,
     AssessmentGeneratorOutputSchema,
 )
 
-# Fetch prompt from Langfuse
-provider = LangfusePromptProvider(...)
-prompt = await provider.get_assessment_generator_prompt(label="production")
+# Fetch a versioned local prompt asset
+provider = LocalPromptProvider()
+prompt = await provider.get_prompt("Assessment Generator")
 
 # Compile with validated inputs
 input_data = AssessmentGeneratorInputSchema(
@@ -400,25 +361,21 @@ result = await llm_provider.invoke_with_schema(
 )
 ```
 
-### Creating Prompts in Langfuse
+### Creating Prompt Assets
 
-```python
-from langfuse import Langfuse
-
-langfuse = Langfuse()
-
-# Create Assessment Generator prompt
-langfuse.create_prompt(
-    name="Assessment Generator",
-    type="text",
-    prompt="""Generate EXACTLY {structured_count} MCQ questions...
+```text
+prompts/assessment-generator.v3.prompt.md
+---
+name: Assessment Generator
+version: 3
+type: text
+---
+Generate EXACTLY {structured_count} MCQ questions...
 
 Respond in JSON format:
 {{
     "questions": [...]
-}}""",
-    labels=["production"],
-)
+}}
 ```
 
 ## Development
@@ -616,7 +573,7 @@ Error: Rate limit exceeded
 **Solution:**
 - Implement exponential backoff in caller
 - Consider request batching
-- Monitor rate limits in Langfuse traces
+- Monitor rate limits in structured logs and traces
 
 #### Prompt Provider Not Available
 
@@ -625,9 +582,9 @@ readyz check fails: prompt_provider_healthy: false
 ```
 
 **Solution:**
-- Verify `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set
-- Check Langfuse host connectivity
-- Ensure prompts exist in Langfuse project
+- Verify `PROMPT_ASSET_DIR` points to the prompt asset directory
+- Check that the expected `.prompt.md` files are present
+- Ensure the requested prompt version exists
 
 #### Service Won't Shut Down
 
@@ -680,4 +637,4 @@ uv run ruff check . && uv run mypy . && uv run pytest
 
 - [CLAUDE.md](CLAUDE.md) - Architecture and development guide
 - [API Documentation](http://localhost:8000/docs) - Swagger UI (when running)
-- [Langfuse Documentation](https://langfuse.com/docs) - Prompt management and telemetry
+- [Langfuse Documentation](https://langfuse.com/docs) - Telemetry only

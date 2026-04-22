@@ -1,380 +1,88 @@
-"""Unit tests for Langfuse prompt provider."""
+"""Unit tests for the local prompt provider."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
-from langfuse.api.commons.errors import (
-    NotFoundError,
-)
 
-from qna_generation_agent.application.errors import (
-    StoragePermanentError,
-)
-from qna_generation_agent.application.ports.prompt_provider import Prompt
-from qna_generation_agent.infrastructure.llm.langfuse_prompt_provider import (
-    LangfusePromptProvider,
+from qna_generation_agent.application.errors import PermanentError
+from qna_generation_agent.infrastructure.llm.local_prompt_provider import (
+    LocalPromptProvider,
 )
 
 
-class FakeLangfusePrompt:
-    """Fake Langfuse prompt for testing."""
+@pytest.mark.unit
+def test_local_prompt_provider_loads_packaged_assets() -> None:
+    provider = LocalPromptProvider()
 
-    def __init__(
-        self,
-        name: str = "Test Prompt",
-        version: int = 1,
-        prompt_text: str = "Test prompt {variable}",
-        chat_messages: list[dict[str, str]] | None = None,
-        labels: list[str] | None = None,
-        config: dict[str, Any] | None = None,
-    ) -> None:
-        self.name = name
-        self.version = version
-        self.prompt = prompt_text
-        self.chat_messages = chat_messages
-        self.labels = labels or ["production"]
-        self.config = config or {}
-
-
-class FakeLangfuseClient:
-    """Fake Langfuse client for testing."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.public_key = kwargs.get("public_key")
-        self.secret_key = kwargs.get("secret_key")
-        self.host = kwargs.get("host")
-        self.environment = kwargs.get("environment")
-        self.prompt_error = kwargs.get("prompt_error")
-        self.prompts: dict[str, FakeLangfusePrompt] = {}
-        self.flushed = False
-
-    def get_prompt(self, name: str, **kwargs: Any) -> FakeLangfusePrompt:
-        if self.prompt_error is not None:
-            raise self.prompt_error
-        if name not in self.prompts:
-            raise NotFoundError(
-                {"error": {"message": f"Prompt '{name}' not found"}}
-            )
-        return self.prompts[name]
-
-    def create_prompt(
-        self,
-        name: str,
-        prompt: str,
-        **kwargs: Any,
-    ) -> FakeLangfusePrompt:
-        lp = FakeLangfusePrompt(name=name, prompt_text=prompt)
-        self.prompts[name] = lp
-        return lp
-
-    def flush(self) -> None:
-        self.flushed = True
-
-    def get_current_trace_id(self) -> str | None:
-        return "trace-123"
+    assert provider.ITEM_WRITER_PROMPT_NAME == "item-writer"
+    assert provider.OPTIONS_ONLY_WRITER_PROMPT_NAME == "options-only-writer"
+    assert provider.FEEDBACK_WRITER_PROMPT_NAME == "feedback-writer"
 
 
 @pytest.mark.unit
-async def test_prompt_provider_handles_auth_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def failing_client(**kwargs: Any) -> FakeLangfuseClient:
-        raise RuntimeError("unauthorized: invalid credentials")
+async def test_local_prompt_provider_resolves_aliases() -> None:
+    provider = LocalPromptProvider()
 
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        failing_client,
+    item_prompt = await provider.get_item_writer_prompt()
+    options_prompt = await provider.get_options_only_writer_prompt()
+    feedback_prompt = await provider.get_feedback_writer_prompt()
+
+    assert item_prompt.name == "item-writer"
+    assert item_prompt.version_string == "item-writer@v1"
+    assert "Assessment Generator" in item_prompt.aliases
+    assert item_prompt.metadata["description"].startswith(
+        "Generate a mixed assessment"
     )
 
-    with pytest.raises(RuntimeError):
-        LangfusePromptProvider(
-            public_key="pk-invalid",
-            secret_key="sk-invalid",
-            host="https://langfuse.example",
-            environment="test",
-        )
+    assert options_prompt.name == "options-only-writer"
+    assert options_prompt.version_string == "options-only-writer@v1"
+    assert "MCQ Answer Generator" in options_prompt.aliases
+
+    assert feedback_prompt.name == "feedback-writer"
+    assert feedback_prompt.version_string == "feedback-writer@v1"
+    assert "MCQ Explanation Generator" in feedback_prompt.aliases
 
 
 @pytest.mark.unit
-async def test_prompt_provider_health_check_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-    fake_client.create_prompt(
-        name="Assessment Generator",
-        prompt="Test prompt",
+async def test_local_prompt_provider_compiles_prompt_sections() -> None:
+    provider = LocalPromptProvider()
+
+    prompt = await provider.get_item_writer_prompt()
+    compiled = prompt.compile(
+        structured_count=2,
+        non_structured_count=1,
+        difficulty="medium",
+        topics="Grammar",
+        chunks="[Chunk 1] Content",
     )
 
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
+    assert compiled.name == "item-writer"
+    assert "structured_count: 2" in compiled.user_prompt
+    assert "Grammar" in compiled.user_prompt
+    assert "[Chunk 1] Content" in compiled.user_prompt
+    assert compiled.system_prompt.startswith(
+        "You are an expert ELP item writer for AssessorFlow Singapore."
     )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    result = await provider.health_check()
-    assert result is True
 
 
 @pytest.mark.unit
-async def test_prompt_provider_health_check_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
+async def test_local_prompt_provider_system_prompt_lookup() -> None:
+    provider = LocalPromptProvider()
 
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
+    assessment_prompt = await provider.get_system_prompt("Assessment Generator")
+    mcq_prompt = await provider.get_system_prompt("MCQ Answer Generator")
 
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
+    assert assessment_prompt.startswith(
+        "You are an expert ELP item writer for AssessorFlow Singapore."
     )
-
-    result = await provider.health_check()
-    assert result is False
+    assert mcq_prompt.startswith(
+        "You are an expert item writer for Singapore ELP assessments."
+    )
 
 
 @pytest.mark.unit
-async def test_prompt_provider_convenience_methods(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-    fake_client.create_prompt(
-        name="Assessment Generator",
-        prompt="Generate questions",
-    )
-    fake_client.create_prompt(
-        name="MCQ Explanation Generator",
-        prompt="Explain MCQ",
-    )
-    fake_client.create_prompt(
-        name="MCQ Answer Generator",
-        prompt="Generate answers",
-    )
+async def test_local_prompt_provider_raises_for_missing_prompt() -> None:
+    provider = LocalPromptProvider()
 
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    assessment_prompt = await provider.get_assessment_generator_prompt(
-        label="production"
-    )
-    assert assessment_prompt.name == "Assessment Generator"
-
-    explanation_prompt = await provider.get_mcq_explanation_generator_prompt()
-    assert explanation_prompt.name == "MCQ Explanation Generator"
-
-    answer_prompt = await provider.get_mcq_answer_generator_prompt(version=1)
-    assert answer_prompt.name == "MCQ Answer Generator"
-
-
-@pytest.mark.unit
-def test_prompt_compile_chat_messages() -> None:
-    """Test that chat prompts compile correctly."""
-    prompt = Prompt(
-        name="Chat Prompt",
-        version=1,
-        prompt_text=None,
-        chat_messages=[
-            {"role": "system", "content": "You are a helpful assistant"},
-            {"role": "user", "content": "Hello {{name}}"},
-        ],
-    )
-
-    compiled = prompt.compile(name="World")
-    assert isinstance(compiled, list)
-    assert compiled[0]["role"] == "system"
-    assert compiled[1]["content"] == "Hello World"
-
-
-@pytest.mark.unit
-def test_prompt_compile_text() -> None:
-    """Test that text prompts compile correctly."""
-    prompt = Prompt(
-        name="Text Prompt",
-        version=1,
-        prompt_text="Hello {{name}}, welcome to {{place}}",
-    )
-
-    compiled = prompt.compile(name="Alice", place="Wonderland")
-    assert isinstance(compiled, str)
-    assert compiled == "Hello Alice, welcome to Wonderland"
-
-
-@pytest.mark.unit
-async def test_prompt_is_chat_prompt() -> None:
-    """Test chat prompt detection."""
-    chat_prompt = Prompt(
-        name="Chat",
-        version=1,
-        chat_messages=[{"role": "user", "content": "Hello"}],
-    )
-    assert chat_prompt.is_chat_prompt() is True
-
-    text_prompt = Prompt(
-        name="Text",
-        version=1,
-        prompt_text="Hello",
-    )
-    assert text_prompt.is_chat_prompt() is False
-
-
-@pytest.mark.unit
-async def test_get_system_prompt_text_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test get_system_prompt returns prompt_text for text prompts."""
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-    fake_client.create_prompt(
-        name="Assessment Generator",
-        prompt="You are an expert assessment generator.",
-    )
-
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    system_prompt = await provider.get_system_prompt("Assessment Generator")
-    assert system_prompt == "You are an expert assessment generator."
-
-
-@pytest.mark.unit
-async def test_get_system_prompt_chat_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test get_system_prompt extracts system message from chat prompts."""
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-    fake_client.create_prompt(
-        name="Chat Prompt",
-        prompt="ignored text",
-    )
-    fake_client.prompts["Chat Prompt"].chat_messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Hello"},
-    ]
-
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    system_prompt = await provider.get_system_prompt("Chat Prompt")
-    assert system_prompt == "You are a helpful assistant."
-
-
-@pytest.mark.unit
-async def test_get_system_prompt_chat_no_system_role(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test get_system_prompt falls back to first message if no system role."""
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-    fake_client.create_prompt(
-        name="Chat Prompt",
-        prompt="ignored",
-    )
-    fake_client.prompts["Chat Prompt"].chat_messages = [
-        {"role": "user", "content": "First message content."},
-    ]
-
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    system_prompt = await provider.get_system_prompt("Chat Prompt")
-    assert system_prompt == "First message content."
-
-
-@pytest.mark.unit
-async def test_get_system_prompt_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test get_system_prompt raises StoragePermanentError for missing prompt."""
-    fake_client = FakeLangfuseClient(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    monkeypatch.setattr(
-        "qna_generation_agent.infrastructure.llm.langfuse_prompt_provider.Langfuse",
-        lambda **kwargs: fake_client,
-    )
-
-    provider = LangfusePromptProvider(
-        public_key="pk-test",
-        secret_key="sk-test",
-        host="https://langfuse.example",
-        environment="test",
-    )
-
-    with pytest.raises(StoragePermanentError) as exc_info:
-        await provider.get_system_prompt("Non-existent Prompt")
-
-    assert "not found" in str(exc_info.value).lower()
+    with pytest.raises(PermanentError):
+        await provider.get_prompt("missing-prompt")

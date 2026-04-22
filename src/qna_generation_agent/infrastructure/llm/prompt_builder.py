@@ -1,4 +1,4 @@
-"""Prompt templates and structured-output schemas for Strands and Langfuse."""
+"""Prompt templates and structured-output schemas for local prompt assets."""
 
 from __future__ import annotations
 
@@ -571,7 +571,7 @@ class MCQAnswerInputSchema(BaseModel):
 def build_system_prompt(question_type: QuestionType) -> str:
     """Build a system prompt for the given question type.
 
-    This is the legacy prompt builder. New code should use Langfuse prompts.
+    This is the legacy prompt builder. New code should use local prompt assets.
 
     Args:
         question_type: Type of question to generate.
@@ -601,7 +601,7 @@ def build_user_prompt(
 ) -> str:
     """Build a user prompt for the given context and parameters.
 
-    This is the legacy prompt builder. New code should use Langfuse prompts.
+    This is the legacy prompt builder. New code should use local prompt assets.
 
     Args:
         context: Assessment context with chunks and topic IDs.
