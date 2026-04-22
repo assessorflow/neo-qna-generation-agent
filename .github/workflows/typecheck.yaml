@@ -6,18 +6,25 @@ on:
   pull_request:
     branches: [main, develop]
 
+permissions:
+  contents: read
+
 jobs:
   mypy:
     name: mypy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55 # v5
         with:
           python-version-file: ".python-version"
 

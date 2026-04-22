@@ -116,7 +116,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(return_value=receipt)
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-
         message = FakeMessage(
             message_id="msg_123",
             data=orjson.dumps(valid_trigger_event),
@@ -163,7 +162,6 @@ class TestPubSubSubscriptionWorker:
             )
         )
         worker = PubSubSubscriptionWorker(subscription_config, handler)
-
 
         message = FakeMessage(
             message_id="msg_123",
@@ -277,13 +275,13 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock()
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-        # Manually set subscriber and future
+        # Manually set subscriber, future and runtime state
         slow_subscriber = TimeoutSubscriber()
         worker._subscriber = slow_subscriber  # type: ignore
         worker._future = slow_subscriber.future  # type: ignore
-
-        # Start the worker first
-        await worker.start()
+        worker._started = True
+        worker._running = True
+        worker._loop = asyncio.get_running_loop()
 
         # Shutdown should handle timeout gracefully
         await worker.shutdown()
@@ -350,7 +348,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=RuntimeError("Unexpected failure"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-
         message = FakeMessage(
             message_id="msg_123",
             data=orjson.dumps(valid_trigger_event),
@@ -369,7 +366,6 @@ class TestPubSubSubscriptionWorker:
         """Test that message is nacked and re-raises CancelledError."""
         handler = AsyncMock(side_effect=asyncio.CancelledError())
         worker = PubSubSubscriptionWorker(subscription_config, handler)
-
 
         message = FakeMessage(
             message_id="msg_123",
@@ -429,7 +425,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=DomainValidationError("Domain error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-
         message = FakeMessage(
             message_id="msg_123",
             data=orjson.dumps(valid_trigger_event),
@@ -449,7 +444,6 @@ class TestPubSubSubscriptionWorker:
         handler = AsyncMock(side_effect=AppValidationError("App error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
 
-
         message = FakeMessage(
             message_id="msg_123",
             data=orjson.dumps(valid_trigger_event),
@@ -468,7 +462,6 @@ class TestPubSubSubscriptionWorker:
         """Test that message is nacked for LLM transient errors."""
         handler = AsyncMock(side_effect=LLMTransientError("LLM transient error"))
         worker = PubSubSubscriptionWorker(subscription_config, handler)
-
 
         message = FakeMessage(
             message_id="msg_123",
@@ -490,7 +483,6 @@ class TestPubSubSubscriptionWorker:
             side_effect=StorageTransientError("Storage transient error")
         )
         worker = PubSubSubscriptionWorker(subscription_config, handler)
-
 
         message = FakeMessage(
             message_id="msg_123",
