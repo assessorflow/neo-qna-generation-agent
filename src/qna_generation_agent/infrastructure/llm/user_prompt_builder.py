@@ -111,7 +111,9 @@ class UserPromptBuilder:
             ValidationError: If inputs are invalid.
         """
         self._validate_non_negative_integer(structured_count, "structured_count")
-        self._validate_non_negative_integer(non_structured_count, "non_structured_count")
+        self._validate_non_negative_integer(
+            non_structured_count, "non_structured_count"
+        )
         self._validate_difficulty(difficulty)
 
         return _ASSESSMENT_GENERATOR_TEMPLATE.format(

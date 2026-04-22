@@ -60,9 +60,7 @@ def _make_settings(
     return Settings.model_construct(**kwargs)
 
 
-def _make_container(
-    settings: Settings | None = None, **overrides: object
-) -> MagicMock:
+def _make_container(settings: Settings | None = None, **overrides: object) -> MagicMock:
     """Create a mock container with sensible defaults."""
     container = MagicMock()
     container.settings = settings or _make_settings()

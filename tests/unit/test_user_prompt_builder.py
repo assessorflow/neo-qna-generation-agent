@@ -18,7 +18,9 @@ class TestUserPromptBuilder:
     def builder(self) -> UserPromptBuilder:
         return UserPromptBuilder()
 
-    def test_build_assessment_generator_prompt(self, builder: UserPromptBuilder) -> None:
+    def test_build_assessment_generator_prompt(
+        self, builder: UserPromptBuilder
+    ) -> None:
         prompt = builder.build_assessment_generator_prompt(
             structured_count=2,
             non_structured_count=1,
@@ -32,7 +34,9 @@ class TestUserPromptBuilder:
         assert "grammar, vocabulary" in prompt
         assert "[Chunk 1]" in prompt
 
-    def test_build_mcq_answer_generator_prompt(self, builder: UserPromptBuilder) -> None:
+    def test_build_mcq_answer_generator_prompt(
+        self, builder: UserPromptBuilder
+    ) -> None:
         prompt = builder.build_mcq_answer_generator_prompt(
             question_text="She ____ to school.",
             topic="present simple",

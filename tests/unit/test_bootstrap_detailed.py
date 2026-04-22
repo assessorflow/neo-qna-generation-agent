@@ -139,7 +139,9 @@ class TestBuildContainerWiring:
 
         settings = Settings()  # type: ignore[call-arg]
 
-        with patch("qna_generation_agent.app.bootstrap.GenerateQnAService") as mock_service:
+        with patch(
+            "qna_generation_agent.app.bootstrap.GenerateQnAService"
+        ) as mock_service:
             mock_service.return_value = MagicMock()
             _build_container(settings)
 

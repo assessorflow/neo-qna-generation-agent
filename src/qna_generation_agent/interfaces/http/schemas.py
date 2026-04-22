@@ -46,4 +46,3 @@ class ErrorResponse(BaseModel):
 
     error: str
     request_id: str
-

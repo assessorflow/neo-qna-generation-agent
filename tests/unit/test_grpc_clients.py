@@ -519,7 +519,6 @@ async def test_knowledge_client_get_chunks_by_ids_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_test_123")
 
@@ -551,7 +550,6 @@ async def test_knowledge_client_get_topics_propagates_metadata(
         lambda channel: fake_stub,
     )
 
-
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(correlation_id="corr_test_456")
 
@@ -582,7 +580,6 @@ async def test_submission_client_create_question_set_propagates_metadata(
         "qna_generation_agent.infrastructure.grpc.submission_client.SubmissionServiceStub",
         lambda channel: fake_stub,
     )
-
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -618,7 +615,6 @@ async def test_submission_client_write_generated_questions_propagates_metadata(
         "qna_generation_agent.infrastructure.grpc.submission_client.SubmissionServiceStub",
         lambda channel: fake_stub,
     )
-
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_write_789")
@@ -662,7 +658,6 @@ async def test_submission_client_increment_iteration_propagates_metadata(
         "qna_generation_agent.infrastructure.grpc.submission_client.SubmissionServiceStub",
         lambda channel: fake_stub,
     )
-
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(correlation_id="corr_inc_999")
@@ -917,7 +912,6 @@ async def test_submission_client_get_assessment_config_success(
         "qna_generation_agent.infrastructure.grpc.submission_client.SubmissionServiceStub",
         lambda channel: fake_stub,
     )
-
 
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id="trace_config_123")

@@ -315,9 +315,7 @@ class TestKnowledgeServiceTools:
             return_value=mock_knowledge_client,
         ):
             tools = KnowledgeServiceTools(target="grpc://localhost:50052")
-            result = await tools.get_chunks_by_ids(
-                chunk_ids=["chunk_123", "chunk_456"]
-            )
+            result = await tools.get_chunks_by_ids(chunk_ids=["chunk_123", "chunk_456"])
 
             assert isinstance(result, dict)
             assert "chunks" in result
@@ -510,16 +508,17 @@ class TestQnAGenerationToolkit:
     """Tests for QnAGenerationToolkit class."""
 
     @pytest.mark.asyncio
-    async def test_toolkit_init(
-        self, mock_knowledge_client, mock_submission_client
-    ):
+    async def test_toolkit_init(self, mock_knowledge_client, mock_submission_client):
         """Test initialization creates both tool instances."""
-        with patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
-            return_value=mock_knowledge_client,
-        ), patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
-            return_value=mock_submission_client,
+        with (
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
+                return_value=mock_knowledge_client,
+            ),
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
+                return_value=mock_submission_client,
+            ),
         ):
             toolkit = QnAGenerationToolkit(
                 knowledge_target="grpc://localhost:50052",
@@ -554,12 +553,15 @@ class TestQnAGenerationToolkit:
         )
         mock_submission_client.get_assessment_config.return_value = config
 
-        with patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
-            return_value=mock_knowledge_client,
-        ), patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
-            return_value=mock_submission_client,
+        with (
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
+                return_value=mock_knowledge_client,
+            ),
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
+                return_value=mock_submission_client,
+            ),
         ):
             toolkit = QnAGenerationToolkit(
                 knowledge_target="grpc://localhost:50052",
@@ -582,16 +584,17 @@ class TestQnAGenerationToolkit:
             mock_submission_client.get_assessment_config.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_toolkit_close(
-        self, mock_knowledge_client, mock_submission_client
-    ):
+    async def test_toolkit_close(self, mock_knowledge_client, mock_submission_client):
         """Test close method closes both knowledge and submission tools."""
-        with patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
-            return_value=mock_knowledge_client,
-        ), patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
-            return_value=mock_submission_client,
+        with (
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
+                return_value=mock_knowledge_client,
+            ),
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
+                return_value=mock_submission_client,
+            ),
         ):
             toolkit = QnAGenerationToolkit(
                 knowledge_target="grpc://localhost:50052",
@@ -702,17 +705,22 @@ class TestErrorHandling:
         self, mock_knowledge_client, mock_submission_client
     ):
         """Test that errors in toolkit context gathering propagate correctly."""
-        mock_submission_client.get_assessment_config.side_effect = StorageTransientError(
-            "Assessment config unavailable",
-            retry_after_seconds=5,
+        mock_submission_client.get_assessment_config.side_effect = (
+            StorageTransientError(
+                "Assessment config unavailable",
+                retry_after_seconds=5,
+            )
         )
 
-        with patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
-            return_value=mock_knowledge_client,
-        ), patch(
-            "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
-            return_value=mock_submission_client,
+        with (
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcKnowledgeClient",
+                return_value=mock_knowledge_client,
+            ),
+            patch(
+                "qna_generation_agent.infrastructure.grpc.strands_tools.GrpcSubmissionClient",
+                return_value=mock_submission_client,
+            ),
         ):
             toolkit = QnAGenerationToolkit(
                 knowledge_target="grpc://localhost:50052",

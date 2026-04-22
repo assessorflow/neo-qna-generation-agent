@@ -110,16 +110,28 @@ def _load_prompt_asset(asset_path: Any) -> _PromptRecord:
         raise ValueError(f"Prompt asset {asset_path.name} is missing frontmatter")
 
     try:
-        end_index = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+        end_index = next(
+            index
+            for index, line in enumerate(lines[1:], start=1)
+            if line.strip() == "---"
+        )
     except StopIteration as error:
-        raise ValueError(f"Prompt asset {asset_path.name} has unterminated frontmatter") from error
+        raise ValueError(
+            f"Prompt asset {asset_path.name} has unterminated frontmatter"
+        ) from error
 
     metadata = _parse_frontmatter(lines[1:end_index])
     name = str(metadata.pop("name"))
     version = str(metadata.pop("version"))
     aliases_raw = metadata.pop("aliases", [])
-    aliases = tuple(str(alias) for alias in aliases_raw) if isinstance(aliases_raw, list) else ()
-    system_prompt, user_prompt = _split_prompt_sections("\n".join(lines[end_index + 1 :]))
+    aliases = (
+        tuple(str(alias) for alias in aliases_raw)
+        if isinstance(aliases_raw, list)
+        else ()
+    )
+    system_prompt, user_prompt = _split_prompt_sections(
+        "\n".join(lines[end_index + 1 :])
+    )
 
     prompt = Prompt(
         name=name,
@@ -141,7 +153,9 @@ class LocalPromptProvider(PromptProvider):
         self._aliases: dict[str, str] = {}
 
         if not prompt_root.is_dir():
-            raise PermanentError("Prompt asset directory is missing", directory=_PROMPT_ASSET_DIR)
+            raise PermanentError(
+                "Prompt asset directory is missing", directory=_PROMPT_ASSET_DIR
+            )
 
         for asset_path in sorted(prompt_root.iterdir(), key=lambda entry: entry.name):
             if not asset_path.name.endswith(".prompt.md"):
@@ -158,7 +172,9 @@ class LocalPromptProvider(PromptProvider):
         }
         missing = sorted(name for name in required_prompts if name not in self._prompts)
         if missing:
-            raise PermanentError("Missing required prompt assets", missing_prompts=missing)
+            raise PermanentError(
+                "Missing required prompt assets", missing_prompts=missing
+            )
 
         logger.info(
             "local_prompt_provider_initialized",
